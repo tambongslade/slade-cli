@@ -28,11 +28,10 @@ describe('event backbone recipe', () => {
     );
     const outbox = await fs.readFile(path.join(root, 'outbox.service.ts'), 'utf-8');
     const relay = await fs.readFile(path.join(root, 'outbox-relay.service.ts'), 'utf-8');
-    const migrationDirectory = path.join(testDir, 'src/migrations');
-    const migrations = await fs.readdir(migrationDirectory);
-    const [migrationFile] = migrations;
-    expect(migrationFile).toBeDefined();
-    const migration = await fs.readFile(path.join(migrationDirectory, migrationFile!), 'utf-8');
+    const eventStoreSchema = await fs.readFile(
+      path.join(root, 'entities/event-store.orm-entity.ts'),
+      'utf-8',
+    );
 
     expect(types).toContain('eventId: string;');
     expect(types).toContain('version: number;');
@@ -62,7 +61,12 @@ describe('event backbone recipe', () => {
     expect(relay).toContain("updated_at < now() - interval '5 minutes'");
     expect(relay).toContain('Array.isArray(result[0]) ? result[0] : result');
     expect(relay).toContain('version: row.version');
-    expect(migration).toContain('idx_event_store_event_id');
-    expect(migration).toContain('"version" int NOT NULL');
+    // Drizzle projects don't get a hand-written migration class — the pgTable
+    // schema is the source of truth and `drizzle-kit generate` diffs it into
+    // SQL. Replay safety instead rests on this schema enforcing a UNIQUE
+    // index on eventId and a NOT NULL version column.
+    expect(eventStoreSchema).toContain('pgTable(');
+    expect(eventStoreSchema).toContain('uniqueIndex("idx_event_store_event_id").on(table.eventId)');
+    expect(eventStoreSchema).toContain('version: integer("version").notNull()');
   });
 });

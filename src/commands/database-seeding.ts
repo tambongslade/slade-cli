@@ -5,13 +5,13 @@ import { toPascalCase, toCamelCase, toKebabCase } from '../utils/naming.utils';
 
 export interface DatabaseSeedingOptions {
   module?: string;
-  orm?: 'typeorm' | 'prisma' | 'mikro-orm';
+  orm?: 'drizzle' | 'prisma';
   entities?: string[];
 }
 
 export async function setupDatabaseSeeding(
   basePath: string,
-  options: DatabaseSeedingOptions = {}
+  options: DatabaseSeedingOptions = {},
 ): Promise<void> {
   console.log(chalk.bold.blue('\n🌱 Setting up Database Seeding Infrastructure\n'));
 
@@ -19,15 +19,15 @@ export async function setupDatabaseSeeding(
   const pascalName = toPascalCase(moduleName);
   const camelName = toCamelCase(moduleName);
   const kebabName = toKebabCase(moduleName);
-  const orm = options.orm || 'typeorm';
+  const orm = options.orm || 'drizzle';
   const entities = options.entities || [moduleName];
 
   const baseDir = path.join(basePath, 'src', kebabName, 'infrastructure', 'seeding');
   fs.mkdirSync(baseDir, { recursive: true });
 
   // Seed runner
-  const seedRunnerContent = `import { Injectable, Logger, OnModuleInit } from '@nestjs/common';
-${orm === 'typeorm' ? "import { DataSource, EntityManager } from 'typeorm';" : ''}
+  const seedRunnerContent = `import { Injectable, Inject, Logger, OnModuleInit } from '@nestjs/common';
+${orm === 'drizzle' ? "import { DRIZZLE, DrizzleDb } from '@shared/database/drizzle.provider';" : ''}
 ${orm === 'prisma' ? "import { PrismaService } from '../prisma/prisma.service';" : ''}
 
 interface SeedConfig {
@@ -46,7 +46,7 @@ interface SeederClass {
 
 export interface SeedContext {
   environment: string;
-  ${orm === 'typeorm' ? 'entityManager: EntityManager;' : ''}
+  ${orm === 'drizzle' ? 'db: DrizzleDb;' : ''}
   ${orm === 'prisma' ? 'prisma: PrismaService;' : ''}
   logger: Logger;
   data: Map<string, any>;
@@ -62,7 +62,7 @@ export class SeedRunner implements OnModuleInit {
   private readonly executedSeeders: Set<string> = new Set();
 
   constructor(
-    ${orm === 'typeorm' ? 'private readonly dataSource: DataSource,' : ''}
+    ${orm === 'drizzle' ? '@Inject(DRIZZLE) private readonly db: DrizzleDb,' : ''}
     ${orm === 'prisma' ? 'private readonly prisma: PrismaService,' : ''}
   ) {}
 
@@ -99,18 +99,30 @@ export class SeedRunner implements OnModuleInit {
   }
 
   /**
-   * Run all registered seeders
+   * Run all registered seeders${orm === 'drizzle' ? '\n   * All seeders run inside a single Drizzle transaction, so a failed seeder rolls back everything that already ran.' : ''}
    */
   async runAll(environment?: string): Promise<void> {
     const env = environment || process.env.NODE_ENV || 'development';
     this.logger.log(\`Running seeders for environment: \${env}\`);
+${
+  orm === 'drizzle'
+    ? `
+    await this.db.transaction(async (tx) => {
+      const context = this.createContext(env, tx as unknown as DrizzleDb);
 
+      for (const seeder of this.seeders) {
+        await this.runSeeder(seeder, context);
+      }
+    });
+`
+    : `
     const context = await this.createContext(env);
 
     for (const seeder of this.seeders) {
       await this.runSeeder(seeder, context);
     }
-
+`
+}
     this.logger.log('All seeders completed');
   }
 
@@ -169,10 +181,29 @@ export class SeedRunner implements OnModuleInit {
     const env = environment || process.env.NODE_ENV || 'development';
     this.logger.log(\`Rolling back seeders for environment: \${env}\`);
 
-    const context = await this.createContext(env);
-
     // Rollback in reverse order
     const reversedSeeders = [...this.seeders].reverse();
+${
+  orm === 'drizzle'
+    ? `
+    await this.db.transaction(async (tx) => {
+      const context = this.createContext(env, tx as unknown as DrizzleDb);
+
+      for (const seeder of reversedSeeders) {
+        if (seeder.rollback && this.executedSeeders.has(seeder.config.name)) {
+          try {
+            this.logger.log(\`Rolling back seeder: \${seeder.config.name}\`);
+            await seeder.rollback(context);
+            this.executedSeeders.delete(seeder.config.name);
+          } catch (error) {
+            this.logger.error(\`Rollback failed for \${seeder.config.name}: \${error}\`);
+          }
+        }
+      }
+    });
+`
+    : `
+    const context = await this.createContext(env);
 
     for (const seeder of reversedSeeders) {
       if (seeder.rollback && this.executedSeeders.has(seeder.config.name)) {
@@ -185,20 +216,31 @@ export class SeedRunner implements OnModuleInit {
         }
       }
     }
-  }
+`
+}  }
 
   /**
    * Create seed context
    */
-  private async createContext(environment: string): Promise<SeedContext> {
+${
+  orm === 'drizzle'
+    ? `  private createContext(environment: string, tx: DrizzleDb): SeedContext {
     return {
       environment,
-      ${orm === 'typeorm' ? 'entityManager: this.dataSource.manager,' : ''}
+      db: tx,
+      logger: this.logger,
+      data: new Map(),
+    };
+  }`
+    : `  private async createContext(environment: string): Promise<SeedContext> {
+    return {
+      environment,
       ${orm === 'prisma' ? 'prisma: this.prisma,' : ''}
       logger: this.logger,
       data: new Map(),
     };
-  }
+  }`
+}
 
   /**
    * Reset execution state
@@ -299,10 +341,11 @@ export class FixtureFactory {
 // Example Factory Definitions
 // ===============================
 
-${entities.map(entity => {
-  const pascal = toPascalCase(entity);
-  const camel = toCamelCase(entity);
-  return `
+${entities
+  .map((entity) => {
+    const pascal = toPascalCase(entity);
+    const camel = toCamelCase(entity);
+    return `
 /**
  * ${pascal} factory definition
  */
@@ -330,7 +373,8 @@ FixtureFactory.define<{
     }),
   },
 });`;
-}).join('\n')}
+  })
+  .join('\n')}
 
 // ===============================
 // Builder Pattern Factory
@@ -516,7 +560,7 @@ export class ${pascalName}Seeder {
    */
   async shouldRun(context: SeedContext): Promise<boolean> {
     // Example: Check if data already exists
-    // const count = await context.entityManager.count(${pascalName}Entity);
+    // const [{ count }] = await context.db.select({ count: sql\`count(*)::int\` }).from(${camelName}Table);
     // return count === 0;
     return true;
   }
@@ -531,7 +575,7 @@ export class ${pascalName}Seeder {
     const items = FixtureFactory.createMany('${camelName}', 50);
 
     // Insert data
-    // await context.entityManager.save(${pascalName}Entity, items);
+    // await context.db.insert(${camelName}Table).values(items);
 
     // Store reference for dependent seeders
     context.data.set('${camelName}Ids', items.map(i => i.id));
@@ -546,7 +590,7 @@ export class ${pascalName}Seeder {
     context.logger.log('Rolling back ${pascalName} data...');
 
     // Delete seeded data
-    // await context.entityManager.delete(${pascalName}Entity, {});
+    // await context.db.delete(${camelName}Table);
 
     context.data.delete('${camelName}Ids');
   }
@@ -578,7 +622,10 @@ export class ReferenceDataSeeder {
       { code: 'ARCHIVED', name: 'Archived', order: 4 },
     ];
 
-    // await context.entityManager.upsert(StatusEntity, statuses, ['code']);
+    // await context.db
+    //   .insert(statusesTable)
+    //   .values(statuses)
+    //   .onConflictDoUpdate({ target: statusesTable.code, set: { name: sql\`excluded.name\`, order: sql\`excluded.order\` } });
 
     context.data.set('statuses', statuses);
   }

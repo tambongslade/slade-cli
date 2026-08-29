@@ -17,7 +17,7 @@ interface BatchSchema {
   version: string;
   project?: {
     name: string;
-    orm: 'typeorm' | 'prisma';
+    orm: 'drizzle' | 'prisma';
     database: string;
   };
   modules: BatchModule[];
@@ -64,11 +64,16 @@ interface GenerationStep {
   dependencies: string[];
 }
 
-export async function batchGenerate(schemaPath: string, options: BatchGenerateOptions = {}): Promise<void> {
+export async function batchGenerate(
+  schemaPath: string,
+  options: BatchGenerateOptions = {},
+): Promise<void> {
   console.log(chalk.bold.blue('\n📦 Batch Generation\n'));
 
   const basePath = options.path || process.cwd();
-  const absoluteSchemaPath = path.isAbsolute(schemaPath) ? schemaPath : path.join(basePath, schemaPath);
+  const absoluteSchemaPath = path.isAbsolute(schemaPath)
+    ? schemaPath
+    : path.join(basePath, schemaPath);
 
   if (!fs.existsSync(absoluteSchemaPath)) {
     console.log(chalk.red(`❌ Schema file not found: ${schemaPath}`));
@@ -87,7 +92,7 @@ export async function batchGenerate(schemaPath: string, options: BatchGenerateOp
   const validation = validateSchema(schema);
   if (!validation.valid) {
     console.log(chalk.red('❌ Schema validation failed:'));
-    validation.errors.forEach(e => console.log(chalk.red(`  • ${e}`)));
+    validation.errors.forEach((e) => console.log(chalk.red(`  • ${e}`)));
     return;
   }
 
@@ -130,8 +135,9 @@ export async function batchGenerate(schemaPath: string, options: BatchGenerateOp
     });
 
     console.log(chalk.green(`\n✅ Batch generation completed!`));
-    console.log(chalk.gray(`  Created ${plan.totalModules} modules with ${plan.totalEntities} entities`));
-
+    console.log(
+      chalk.gray(`  Created ${plan.totalModules} modules with ${plan.totalEntities} entities`),
+    );
   } catch (error) {
     console.log(chalk.red(`\n❌ Generation failed: ${(error as Error).message}`));
     console.log(chalk.yellow('  Changes have been rolled back'));
@@ -308,9 +314,8 @@ function topologicalSort(steps: GenerationStep[]): GenerationStep[] {
 
     // Visit dependencies first
     for (const dep of step.dependencies) {
-      const depStep = steps.find(s =>
-        s.type === 'entity' &&
-        (s.name === dep || `${s.module}.${s.name}` === dep)
+      const depStep = steps.find(
+        (s) => s.type === 'entity' && (s.name === dep || `${s.module}.${s.name}` === dep),
       );
       if (depStep) {
         visit(depStep);
@@ -323,19 +328,23 @@ function topologicalSort(steps: GenerationStep[]): GenerationStep[] {
   }
 
   // First add all modules
-  for (const step of steps.filter(s => s.type === 'module')) {
+  for (const step of steps.filter((s) => s.type === 'module')) {
     visit(step);
   }
 
   // Then add entities
-  for (const step of steps.filter(s => s.type === 'entity')) {
+  for (const step of steps.filter((s) => s.type === 'entity')) {
     visit(step);
   }
 
   return sorted;
 }
 
-async function executeStep(step: GenerationStep, basePath: string, options: BatchGenerateOptions): Promise<void> {
+async function executeStep(
+  step: GenerationStep,
+  basePath: string,
+  options: BatchGenerateOptions,
+): Promise<void> {
   if (step.type === 'module') {
     console.log(chalk.cyan(`  📁 Creating module: ${step.name}`));
     await generateModule(step.name, { path: basePath });
@@ -372,7 +381,10 @@ function printPlan(plan: GenerationPlan): void {
   }
 }
 
-export async function createBatchSchema(outputPath: string, options: { path?: string } = {}): Promise<void> {
+export async function createBatchSchema(
+  outputPath: string,
+  options: { path?: string } = {},
+): Promise<void> {
   const basePath = options.path || process.cwd();
   const fullPath = path.join(basePath, outputPath);
 
@@ -380,7 +392,7 @@ export async function createBatchSchema(outputPath: string, options: { path?: st
     version: '1.0',
     project: {
       name: 'my-project',
-      orm: 'typeorm',
+      orm: 'drizzle',
       database: 'postgres',
     },
     modules: [
@@ -390,11 +402,11 @@ export async function createBatchSchema(outputPath: string, options: { path?: st
           {
             name: 'User',
             fields: {
-              'email': 'string:unique',
-              'password': 'string',
-              'firstName': 'string:optional',
-              'lastName': 'string:optional',
-              'isActive': 'boolean',
+              email: 'string:unique',
+              password: 'string',
+              firstName: 'string:optional',
+              lastName: 'string:optional',
+              isActive: 'boolean',
             },
             options: {
               withTests: true,
@@ -413,10 +425,10 @@ export async function createBatchSchema(outputPath: string, options: { path?: st
           {
             name: 'Post',
             fields: {
-              'title': 'string',
-              'content': 'text',
-              'publishedAt': 'Date:optional',
-              'status': 'string',
+              title: 'string',
+              content: 'text',
+              publishedAt: 'Date:optional',
+              status: 'string',
             },
             options: {
               withEvents: true,

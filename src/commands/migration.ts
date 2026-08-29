@@ -5,14 +5,14 @@ import { ensureDir, writeGeneratedFile } from '../utils/file.utils';
 
 export interface MigrationOptions {
   name: string;
-  orm?: 'typeorm' | 'prisma';
+  orm?: 'drizzle' | 'prisma';
   path?: string;
   dryRun?: boolean;
 }
 
 export interface GenerateMigrationOptions {
   module: string;
-  orm?: 'typeorm' | 'prisma';
+  orm?: 'drizzle' | 'prisma';
   path?: string;
   dryRun?: boolean;
 }
@@ -75,87 +75,99 @@ function findWorkspaceRoot(startPath: string): string {
 }
 
 export async function createMigration(basePath: string, options: MigrationOptions): Promise<void> {
-  const orm = options.orm || 'typeorm';
+  const orm = options.orm || 'drizzle';
   const timestamp = Date.now();
   const migrationName = options.name.replace(/[^a-zA-Z0-9]/g, '_');
 
   console.log(chalk.bold.blue(`\n📦 Creating ${orm} migration: ${migrationName}\n`));
 
-  if (orm === 'typeorm') {
-    await createTypeOrmMigration(basePath, migrationName, timestamp, options.path, options.dryRun);
+  if (orm === 'drizzle') {
+    await createDrizzleMigrationStub(
+      basePath,
+      migrationName,
+      timestamp,
+      options.path,
+      options.dryRun,
+    );
   } else {
     await createPrismaMigration(basePath, migrationName, timestamp, options.path, options.dryRun);
   }
 }
 
-async function createTypeOrmMigration(
+/**
+ * Drizzle doesn't use hand-written TypeScript migration classes the way TypeORM
+ * does. Its real workflow is: edit the `*.orm-entity.ts` `pgTable(...)` schema
+ * files, then run `npx drizzle-kit generate` (which introspects the DB and the
+ * schema files, described via drizzle.config.ts, to emit real SQL migrations
+ * under `./drizzle`), then `npx drizzle-kit migrate` to apply them. A static
+ * generator like this CLI can't safely fabricate that SQL without a live DB
+ * connection, so instead of pretending to be an idiomatic Drizzle migration,
+ * this scaffolds an empty, clearly-labelled SQL placeholder for one-off manual
+ * changes (data backfills, extensions, views, etc.) that drizzle-kit wouldn't
+ * generate on its own, and points the user at the real workflow for schema changes.
+ */
+async function createDrizzleMigrationStub(
   basePath: string,
   name: string,
   timestamp: number,
   customPath?: string,
   dryRun = false,
 ): Promise<void> {
-  const migrationsPath = resolveMigrationOutputPath(
-    basePath,
-    customPath,
-    'src/database/migrations',
-  );
+  const migrationsPath = resolveMigrationOutputPath(basePath, customPath, 'drizzle');
   if (!dryRun) await ensureDir(migrationsPath);
 
-  const className = `${toPascalCase(name)}${timestamp}`;
-  const fileName = `${timestamp}-${name}.ts`;
+  const fileName = `${timestamp}_${name}.sql`;
 
-  const content = `import { MigrationInterface, QueryRunner, Table, TableIndex, TableForeignKey } from "typeorm";
-
-export class ${className} implements MigrationInterface {
-  name = '${className}';
-
-  public async up(queryRunner: QueryRunner): Promise<void> {
-    // TODO: Add your migration logic here
-    // Examples:
-
-    // Create table
-    // await queryRunner.createTable(
-    //   new Table({
-    //     name: "example",
-    //     columns: [
-    //       { name: "id", type: "uuid", isPrimary: true, generationStrategy: "uuid", default: "uuid_generate_v4()" },
-    //       { name: "name", type: "varchar", length: "255" },
-    //       { name: "created_at", type: "timestamp", default: "CURRENT_TIMESTAMP" },
-    //       { name: "updated_at", type: "timestamp", default: "CURRENT_TIMESTAMP" },
-    //     ],
-    //   }),
-    //   true
-    // );
-
-    // Add column
-    // await queryRunner.query(\`ALTER TABLE "example" ADD COLUMN "new_column" varchar(255)\`);
-
-    // Create index
-    // await queryRunner.createIndex("example", new TableIndex({ columnNames: ["name"] }));
-
-    // Add foreign key
-    // await queryRunner.createForeignKey(
-    //   "example",
-    //   new TableForeignKey({
-    //     columnNames: ["user_id"],
-    //     referencedColumnNames: ["id"],
-    //     referencedTableName: "users",
-    //     onDelete: "CASCADE",
-    //   })
-    // );
-  }
-
-  public async down(queryRunner: QueryRunner): Promise<void> {
-    // TODO: Add your rollback logic here (reverse of up)
-    // await queryRunner.dropTable("example");
-  }
-}
+  const content = `-- Manual migration placeholder: ${name}
+-- Created at: ${new Date(timestamp).toISOString()}
+--
+-- Drizzle projects generate real migrations from your *.orm-entity.ts schema
+-- files with drizzle-kit, not by hand-writing migration classes. This file is
+-- only a placeholder for a one-off manual SQL change (e.g. data backfill,
+-- extension, view) that isn't expressed in the schema files themselves.
+--
+-- Recommended workflow for schema changes:
+--   1. Edit the relevant *.orm-entity.ts schema file(s) under
+--      src/modules/**/infrastructure/orm-entities/
+--   2. Run: npx drizzle-kit generate
+--   3. Run: npx drizzle-kit migrate
+--
+-- TODO: Add your manual SQL here.
 `;
 
   await writeGeneratedFile(path.join(migrationsPath, fileName), content, dryRun);
-  console.log(chalk.green(`✓ ${dryRun ? 'Would create' : 'Created'} migration: ${fileName}`));
+  console.log(chalk.green(`✓ ${dryRun ? 'Would create' : 'Created'} migration stub: ${fileName}`));
   console.log(chalk.gray(`  Path: ${migrationsPath}`));
+  console.log(chalk.yellow(`\n  Note: this is a manual placeholder, not a drizzle-kit migration.`));
+  console.log(chalk.yellow(`  For schema changes, edit your *.orm-entity.ts files and run:`));
+  console.log(chalk.white(`    npx drizzle-kit generate`));
+  console.log(chalk.white(`    npx drizzle-kit migrate`));
+
+  await ensureDrizzleConfig(basePath, dryRun);
+}
+
+/**
+ * Make sure drizzle-kit has a config to work with. Mirrors the minimal config
+ * generateDrizzleService() writes in generate-all.ts during `slade init`/`scaffold`.
+ */
+async function ensureDrizzleConfig(basePath: string, dryRun = false): Promise<void> {
+  const drizzleConfigPath = path.join(basePath, 'drizzle.config.ts');
+  if (fs.existsSync(drizzleConfigPath)) return;
+
+  const content = `import { defineConfig } from "drizzle-kit";
+
+export default defineConfig({
+  schema: "./src/modules/**/infrastructure/orm-entities/*.orm-entity.ts",
+  out: "./drizzle",
+  dialect: "postgresql",
+  dbCredentials: {
+    url: process.env.DATABASE_URL!,
+  },
+});
+`;
+
+  await writeGeneratedFile(drizzleConfigPath, content, dryRun);
+  console.log(chalk.green(`✓ ${dryRun ? 'Would create' : 'Created'} drizzle.config.ts`));
 }
 
 async function createPrismaMigration(
@@ -208,7 +220,13 @@ export async function generateMigrationFromEntity(
   basePath: string,
   options: GenerateMigrationOptions,
 ): Promise<void> {
-  const orm = options.orm || 'typeorm';
+  const orm = options.orm || 'drizzle';
+
+  if (orm === 'drizzle') {
+    await guideDrizzleMigrationGeneration(basePath, options.module, options.dryRun);
+    return;
+  }
+
   const modulePath = path.join(basePath, 'src/modules', options.module);
 
   if (!fs.existsSync(modulePath)) {
@@ -245,25 +263,55 @@ export async function generateMigrationFromEntity(
   const timestamp = Date.now();
   const migrationName = `create_${options.module}_tables`;
 
-  if (orm === 'typeorm') {
-    await generateTypeOrmMigration(
-      basePath,
-      tables,
-      migrationName,
-      timestamp,
-      options.path,
-      options.dryRun,
-    );
+  await generatePrismaMigration(
+    basePath,
+    tables,
+    migrationName,
+    timestamp,
+    options.path,
+    options.dryRun,
+  );
+}
+
+/**
+ * Drizzle can't safely fabricate a real migration from entity files without a
+ * live DB connection (see createDrizzleMigrationStub for why). This command's
+ * job — "derive a migration from a module's entities" — is exactly what
+ * `drizzle-kit generate` does properly, by diffing your `*.orm-entity.ts`
+ * schema files against the database. So for Drizzle we just point the user at
+ * that workflow instead of hand-rolling a fake one.
+ */
+async function guideDrizzleMigrationGeneration(
+  basePath: string,
+  moduleName: string,
+  dryRun = false,
+): Promise<void> {
+  const modulePath = path.join(basePath, 'src/modules', moduleName);
+  const schemaGlob = `src/modules/${moduleName}/infrastructure/orm-entities/*.orm-entity.ts`;
+
+  console.log(
+    chalk.bold.blue(
+      `\n📦 Drizzle migrations are generated from schema files, not scaffolded here.\n`,
+    ),
+  );
+
+  if (!fs.existsSync(modulePath)) {
+    console.log(chalk.yellow(`⚠️  Module "${moduleName}" not found at ${modulePath}.`));
   } else {
-    await generatePrismaMigration(
-      basePath,
-      tables,
-      migrationName,
-      timestamp,
-      options.path,
-      options.dryRun,
-    );
+    console.log(chalk.cyan(`  Schema files: ${schemaGlob}`));
   }
+
+  console.log('');
+  console.log(
+    chalk.white("  Drizzle can't fabricate a real migration from entity files without a"),
+  );
+  console.log(chalk.white('  live database connection. Instead:'));
+  console.log(chalk.white(`    1. Edit/verify the *.orm-entity.ts schema file(s) for this module`));
+  console.log(chalk.white(`    2. Run: npx drizzle-kit generate`));
+  console.log(chalk.white(`    3. Run: npx drizzle-kit migrate`));
+  console.log('');
+
+  await ensureDrizzleConfig(basePath, dryRun);
 }
 
 function findEntityFiles(modulePath: string): string[] {
@@ -433,131 +481,6 @@ function mapTypeToSql(tsType: string, options: string): string {
   return typeMap[tsType] || 'varchar(255)';
 }
 
-async function generateTypeOrmMigration(
-  basePath: string,
-  tables: TableDefinition[],
-  name: string,
-  timestamp: number,
-  customPath?: string,
-  dryRun = false,
-): Promise<void> {
-  const migrationsPath = resolveMigrationOutputPath(
-    basePath,
-    customPath,
-    'src/database/migrations',
-  );
-  if (!dryRun) await ensureDir(migrationsPath);
-
-  const className = `${toPascalCase(name)}${timestamp}`;
-  const fileName = `${timestamp}-${name}.ts`;
-
-  let upStatements = '';
-  let downStatements = '';
-
-  for (const table of tables) {
-    // Generate CREATE TABLE
-    const columnDefs = table.columns.map((col) => {
-      let def = `{ name: "${col.name}", type: "${col.type}"`;
-
-      if (col.primary) {
-        def += ', isPrimary: true';
-        if (col.type === 'uuid') {
-          def += ', generationStrategy: "uuid", default: "uuid_generate_v4()"';
-        }
-      }
-
-      if (!col.nullable && !col.primary) {
-        def += ', isNullable: false';
-      } else if (col.nullable) {
-        def += ', isNullable: true';
-      }
-
-      if (col.unique && !col.primary) {
-        def += ', isUnique: true';
-      }
-
-      if (col.default && !col.primary) {
-        def += `, default: "${col.default}"`;
-      }
-
-      def += ' }';
-      return def;
-    });
-
-    upStatements += `
-    // Create ${table.name} table
-    await queryRunner.createTable(
-      new Table({
-        name: "${table.name}",
-        columns: [
-          ${columnDefs.join(',\n          ')},
-        ],
-      }),
-      true
-    );
-`;
-
-    // Generate indexes
-    for (const index of table.indexes) {
-      const indexName = `IDX_${table.name}_${index.columns.join('_')}`;
-      upStatements += `
-    await queryRunner.createIndex(
-      "${table.name}",
-      new TableIndex({
-        name: "${indexName}",
-        columnNames: [${index.columns.map((c) => `"${c}"`).join(', ')}],
-        ${index.unique ? 'isUnique: true,' : ''}
-      })
-    );
-`;
-    }
-
-    // Generate foreign keys
-    for (const col of table.columns.filter((c) => c.references)) {
-      const fkName = `FK_${table.name}_${col.name}`;
-      upStatements += `
-    await queryRunner.createForeignKey(
-      "${table.name}",
-      new TableForeignKey({
-        name: "${fkName}",
-        columnNames: ["${col.name}"],
-        referencedColumnNames: ["${col.references!.column}"],
-        referencedTableName: "${col.references!.table}",
-        onDelete: "SET NULL",
-      })
-    );
-`;
-    }
-
-    // Generate DROP TABLE for down
-    downStatements = `await queryRunner.dropTable("${table.name}", true);\n    ` + downStatements;
-  }
-
-  const content = `import { MigrationInterface, QueryRunner, Table, TableIndex, TableForeignKey } from "typeorm";
-
-export class ${className} implements MigrationInterface {
-  name = '${className}';
-
-  public async up(queryRunner: QueryRunner): Promise<void> {
-    // Enable UUID extension
-    await queryRunner.query('CREATE EXTENSION IF NOT EXISTS "uuid-ossp"');
-${upStatements}
-  }
-
-  public async down(queryRunner: QueryRunner): Promise<void> {
-    ${downStatements}
-  }
-}
-`;
-
-  await writeGeneratedFile(path.join(migrationsPath, fileName), content, dryRun);
-  console.log(chalk.green(`✓ ${dryRun ? 'Would generate' : 'Generated'} migration: ${fileName}`));
-
-  for (const table of tables) {
-    console.log(chalk.gray(`  • Table: ${table.name} (${table.columns.length} columns)`));
-  }
-}
-
 async function generatePrismaMigration(
   basePath: string,
   tables: TableDefinition[],
@@ -629,13 +552,6 @@ async function generatePrismaMigration(
   for (const table of tables) {
     console.log(chalk.gray(`  • Table: ${table.name} (${table.columns.length} columns)`));
   }
-}
-
-function toPascalCase(str: string): string {
-  return str
-    .split(/[-_\s]+/)
-    .map((word) => word.charAt(0).toUpperCase() + word.slice(1).toLowerCase())
-    .join('');
 }
 
 function toSnakeCase(str: string): string {

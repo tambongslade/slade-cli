@@ -65,7 +65,12 @@ export async function runDoctor(options: DoctorOptions) {
       dependencyRoots,
     ),
   );
-  results.push(await checkDependency(projectPath, 'typeorm', 'TypeORM', true, dependencyRoots));
+  results.push(
+    await checkDependency(projectPath, 'drizzle-orm', 'Drizzle ORM', true, dependencyRoots),
+  );
+  results.push(
+    await checkDependency(projectPath, 'postgres', 'Postgres driver', true, dependencyRoots),
+  );
 
   // Check AI context
   results.push(await checkAnyFile(basePath, ['AGENTS.md', 'CLAUDE.md'], 'AI context file', true));

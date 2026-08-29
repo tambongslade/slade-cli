@@ -13,7 +13,10 @@ export interface FilterDSLOptions {
   entity?: string;
 }
 
-export async function generateFilterDSL(basePath: string, options: FilterDSLOptions = {}): Promise<void> {
+export async function generateFilterDSL(
+  basePath: string,
+  options: FilterDSLOptions = {},
+): Promise<void> {
   console.log(chalk.bold.blue('\n🔍 Generating Filter DSL System\n'));
 
   const sharedPath = path.join(basePath, 'src/shared');
@@ -30,8 +33,8 @@ export async function generateFilterDSL(basePath: string, options: FilterDSLOpti
   // Generate specification pattern
   await generateSpecificationPattern(filtersPath);
 
-  // Generate TypeORM filter adapter
-  await generateTypeORMAdapter(filtersPath);
+  // Generate Drizzle filter adapter
+  await generateDrizzleAdapter(filtersPath);
 
   // Generate Prisma filter adapter
   await generatePrismaAdapter(filtersPath);
@@ -40,13 +43,16 @@ export async function generateFilterDSL(basePath: string, options: FilterDSLOpti
   await generateFilterDTOTemplates(filtersPath);
 
   // Generate index
-  await writeFile(path.join(filtersPath, 'index.ts'), `export * from './filter.types';
+  await writeFile(
+    path.join(filtersPath, 'index.ts'),
+    `export * from './filter.types';
 export * from './filter.builder';
 export * from './specification';
-export * from './typeorm.adapter';
+export * from './drizzle.adapter';
 export * from './prisma.adapter';
 export * from './filter.dto';
-`);
+`,
+  );
 
   console.log(chalk.green('\n✅ Filter DSL system generated!'));
 }
@@ -787,205 +793,176 @@ export const spec = {
   console.log(chalk.green('  ✓ Specification pattern'));
 }
 
-async function generateTypeORMAdapter(filtersPath: string): Promise<void> {
-  const content = `import { SelectQueryBuilder, ObjectLiteral } from 'typeorm';
-import { FilterCondition, FilterQuery, FilterResult, FilterGroup } from './filter.types';
+async function generateDrizzleAdapter(filtersPath: string): Promise<void> {
+  const content = `import { and, or, eq, ne, gt, gte, lt, lte, inArray, notInArray, ilike, isNull, isNotNull, asc, desc, count, type SQL } from 'drizzle-orm';
+import type { AnyPgColumn, PgTable } from 'drizzle-orm/pg-core';
+import { DrizzleDb } from '@shared/database/drizzle.provider';
+import { FilterCondition, FilterGroup, FilterQuery, FilterResult } from './filter.types';
 
 /**
- * TypeORM adapter for filter queries
+ * Map of filterable field name -> Drizzle column, e.g.
+ * { id: usersTable.id, email: usersTable.email }
  */
-export class TypeORMFilterAdapter {
+export type FilterColumnMap = Record<string, AnyPgColumn>;
+
+/**
+ * Drizzle (Postgres) adapter for filter queries
+ */
+export class DrizzleFilterAdapter {
   /**
-   * Apply filter query to TypeORM query builder
+   * Build a drizzle-orm WHERE condition (conditions + search) from a filter query
    */
-  static apply<T extends ObjectLiteral>(
-    qb: SelectQueryBuilder<T>,
-    query: FilterQuery,
-    alias?: string
-  ): SelectQueryBuilder<T> {
-    const tableAlias = alias || qb.alias;
+  static buildWhere(query: FilterQuery, columns: FilterColumnMap): SQL | undefined {
+    const clauses: SQL[] = [];
 
-    // Apply conditions
     for (const condition of query.conditions) {
-      if ('type' in condition) {
-        // It's a filter group
-        this.applyGroup(qb, condition as unknown as FilterGroup, tableAlias);
-      } else {
-        this.applyCondition(qb, condition, tableAlias);
-      }
+      const clause = 'type' in condition
+        ? this.buildGroup(condition as unknown as FilterGroup, columns)
+        : this.buildCondition(condition as FilterCondition, columns);
+
+      if (clause) clauses.push(clause);
     }
 
-    // Apply search
-    if (query.search) {
-      const searchConditions = query.search.fields.map(field => {
-        const paramName = \`search_\${field.replace('.', '_')}\`;
-        qb.setParameter(paramName, \`%\${query.search!.query}%\`);
-        return \`\${tableAlias}.\${field} ILIKE :\${paramName}\`;
-      });
+    if (query.search?.fields.length) {
+      const searchClauses = query.search.fields
+        .map((field) => columns[field])
+        .filter((column): column is AnyPgColumn => Boolean(column))
+        .map((column) => ilike(column, \`%\${query.search!.query}%\`));
 
-      const operator = query.search.mode === 'all' ? ' AND ' : ' OR ';
-      qb.andWhere(\`(\${searchConditions.join(operator)})\`);
+      const combined =
+        searchClauses.length === 0
+          ? undefined
+          : query.search.mode === 'all'
+            ? and(...searchClauses)
+            : or(...searchClauses);
+
+      if (combined) clauses.push(combined);
     }
 
-    // Apply sorting
-    if (query.sort?.length) {
-      for (const sort of query.sort) {
-        qb.addOrderBy(
-          \`\${tableAlias}.\${sort.field}\`,
-          sort.direction,
-          sort.nulls === 'first' ? 'NULLS FIRST' : sort.nulls === 'last' ? 'NULLS LAST' : undefined
-        );
-      }
-    }
-
-    // Apply pagination
-    if (query.pagination) {
-      qb.skip(query.pagination.offset ?? (query.pagination.page - 1) * query.pagination.limit);
-      qb.take(query.pagination.limit);
-    }
-
-    // Apply relations
-    if (query.include?.length) {
-      for (const relation of query.include) {
-        qb.leftJoinAndSelect(\`\${tableAlias}.\${relation}\`, relation);
-      }
-    }
-
-    // Apply field selection
-    if (query.select?.length) {
-      qb.select(query.select.map(f => \`\${tableAlias}.\${f}\`));
-    }
-
-    return qb;
+    return clauses.length > 0 ? and(...clauses) : undefined;
   }
 
   /**
-   * Apply a single condition
+   * Build the ORDER BY clauses from a filter query
    */
-  private static applyCondition<T extends ObjectLiteral>(
-    qb: SelectQueryBuilder<T>,
-    condition: FilterCondition,
-    alias: string
-  ): void {
-    const field = \`\${alias}.\${condition.field}\`;
-    const paramName = \`\${condition.field.replace('.', '_')}_\${Date.now()}\`;
+  static buildOrderBy(query: FilterQuery, columns: FilterColumnMap): SQL[] {
+    if (!query.sort?.length) return [];
+
+    return query.sort
+      .map((sort) => {
+        const column = columns[sort.field];
+        if (!column) return undefined;
+        return sort.direction === 'ASC' ? asc(column) : desc(column);
+      })
+      .filter((clause): clause is SQL => Boolean(clause));
+  }
+
+  /**
+   * Convert a single condition into a drizzle-orm SQL fragment
+   */
+  private static buildCondition(condition: FilterCondition, columns: FilterColumnMap): SQL | undefined {
+    const column = columns[condition.field];
+    if (!column) return undefined;
 
     switch (condition.operator) {
       case 'eq':
-        qb.andWhere(\`\${field} = :\${paramName}\`, { [paramName]: condition.value });
-        break;
+        return eq(column, condition.value);
       case 'ne':
-        qb.andWhere(\`\${field} != :\${paramName}\`, { [paramName]: condition.value });
-        break;
+        return ne(column, condition.value);
       case 'gt':
-        qb.andWhere(\`\${field} > :\${paramName}\`, { [paramName]: condition.value });
-        break;
+        return gt(column, condition.value);
       case 'gte':
-        qb.andWhere(\`\${field} >= :\${paramName}\`, { [paramName]: condition.value });
-        break;
+        return gte(column, condition.value);
       case 'lt':
-        qb.andWhere(\`\${field} < :\${paramName}\`, { [paramName]: condition.value });
-        break;
+        return lt(column, condition.value);
       case 'lte':
-        qb.andWhere(\`\${field} <= :\${paramName}\`, { [paramName]: condition.value });
-        break;
+        return lte(column, condition.value);
       case 'in':
-        qb.andWhere(\`\${field} IN (:\${paramName})\`, { [paramName]: condition.value });
-        break;
+        return inArray(column, condition.value);
       case 'nin':
-        qb.andWhere(\`\${field} NOT IN (:\${paramName})\`, { [paramName]: condition.value });
-        break;
+        return notInArray(column, condition.value);
       case 'like':
-        qb.andWhere(\`\${field} LIKE :\${paramName}\`, { [paramName]: condition.value });
-        break;
+        return ilike(column, condition.value);
       case 'ilike':
-        qb.andWhere(\`\${field} ILIKE :\${paramName}\`, { [paramName]: condition.value });
-        break;
-      case 'between':
+        return ilike(column, condition.value);
+      case 'between': {
         const [from, to] = condition.value;
-        qb.andWhere(\`\${field} BETWEEN :\${paramName}_from AND :\${paramName}_to\`, {
-          [\`\${paramName}_from\`]: from,
-          [\`\${paramName}_to\`]: to,
-        });
-        break;
+        return and(gte(column, from), lte(column, to));
+      }
       case 'isNull':
-        qb.andWhere(\`\${field} IS NULL\`);
-        break;
+        return isNull(column);
       case 'isNotNull':
-        qb.andWhere(\`\${field} IS NOT NULL\`);
-        break;
+        return isNotNull(column);
       case 'contains':
-        qb.andWhere(\`\${field} ILIKE :\${paramName}\`, { [paramName]: \`%\${condition.value}%\` });
-        break;
+        return ilike(column, \`%\${condition.value}%\`);
       case 'startsWith':
-        qb.andWhere(\`\${field} ILIKE :\${paramName}\`, { [paramName]: \`\${condition.value}%\` });
-        break;
+        return ilike(column, \`\${condition.value}%\`);
       case 'endsWith':
-        qb.andWhere(\`\${field} ILIKE :\${paramName}\`, { [paramName]: \`%\${condition.value}\` });
-        break;
+        return ilike(column, \`%\${condition.value}\`);
+      default:
+        return undefined;
     }
   }
 
   /**
-   * Apply a filter group (AND/OR)
+   * Convert a filter group (AND/OR), including nested groups, into a drizzle-orm SQL fragment
    */
-  private static applyGroup<T extends ObjectLiteral>(
-    qb: SelectQueryBuilder<T>,
-    group: FilterGroup,
-    alias: string
-  ): void {
-    // Create a subquery builder for the group
-    const conditions: string[] = [];
-    const params: Record<string, any> = {};
+  private static buildGroup(group: FilterGroup, columns: FilterColumnMap): SQL | undefined {
+    const clauses = group.conditions
+      .map((condition) =>
+        'type' in condition
+          ? this.buildGroup(condition as FilterGroup, columns)
+          : this.buildCondition(condition as FilterCondition, columns)
+      )
+      .filter((clause): clause is SQL => Boolean(clause));
 
-    for (const condition of group.conditions) {
-      if ('type' in condition) {
-        // Nested group - recursive
-        // For simplicity, we'll handle one level of nesting
-        continue;
-      }
+    if (clauses.length === 0) return undefined;
 
-      const cond = condition as FilterCondition;
-      const field = \`\${alias}.\${cond.field}\`;
-      const paramName = \`\${cond.field.replace('.', '_')}_\${Date.now()}_\${Math.random().toString(36).slice(2, 7)}\`;
-
-      switch (cond.operator) {
-        case 'eq':
-          conditions.push(\`\${field} = :\${paramName}\`);
-          params[paramName] = cond.value;
-          break;
-        case 'ne':
-          conditions.push(\`\${field} != :\${paramName}\`);
-          params[paramName] = cond.value;
-          break;
-        // Add other operators as needed
-      }
-    }
-
-    if (conditions.length > 0) {
-      const joinOperator = group.type === 'and' ? ' AND ' : ' OR ';
-      qb.andWhere(\`(\${conditions.join(joinOperator)})\`, params);
-    }
+    return group.type === 'and' ? and(...clauses) : or(...clauses);
   }
 
   /**
-   * Execute query and return paginated result
+   * Execute a filter query against a Drizzle table and return a paginated result.
+   *
+   * NOTE: relation eager-loading (\`query.include\`) and column projection
+   * (\`query.select\`) from the filter DSL have no generic Drizzle equivalent
+   * here — a plain \`PgTable\`/column map doesn't carry relation config the way
+   * TypeORM's query builder did. Use Drizzle's relational query API
+   * (\`db.query.<table>.findMany({ with, columns })\`) directly if you need
+   * those; \`include\`/\`select\` on the query are ignored by this adapter.
    */
-  static async execute<T extends ObjectLiteral>(
-    qb: SelectQueryBuilder<T>,
+  static async execute<T extends Record<string, unknown>>(
+    db: DrizzleDb,
+    table: PgTable,
+    columns: FilterColumnMap,
     query: FilterQuery
   ): Promise<FilterResult<T>> {
-    const [data, total] = await qb.getManyAndCount();
+    const where = this.buildWhere(query, columns);
+    const orderBy = this.buildOrderBy(query, columns);
 
     const page = query.pagination?.page || 1;
-    const limit = query.pagination?.limit || data.length;
-    const totalPages = Math.ceil(total / limit);
+    const limit = query.pagination?.limit;
+    const offset = query.pagination?.offset ?? (limit ? (page - 1) * limit : undefined);
+
+    const rowsQuery = db.select().from(table);
+    const filteredRows = where ? rowsQuery.where(where) : rowsQuery;
+    const orderedRows = orderBy.length > 0 ? filteredRows.orderBy(...orderBy) : filteredRows;
+    const limitedRows = limit !== undefined ? orderedRows.limit(limit) : orderedRows;
+    const pagedRows = offset !== undefined ? limitedRows.offset(offset) : limitedRows;
+
+    const countQuery = db.select({ value: count() }).from(table);
+    const filteredCount = where ? countQuery.where(where) : countQuery;
+
+    const [data, [countResult]] = await Promise.all([pagedRows, filteredCount]);
+    const total = countResult?.value ?? 0;
+    const effectiveLimit = limit ?? (data.length || 1);
+    const totalPages = Math.ceil(total / effectiveLimit);
 
     return {
-      data,
+      data: data as unknown as T[],
       total,
       page,
-      limit,
+      limit: limit ?? data.length,
       totalPages,
       hasNext: page < totalPages,
       hasPrev: page > 1,
@@ -994,8 +971,8 @@ export class TypeORMFilterAdapter {
 }
 `;
 
-  await writeFile(path.join(filtersPath, 'typeorm.adapter.ts'), content);
-  console.log(chalk.green('  ✓ TypeORM adapter'));
+  await writeFile(path.join(filtersPath, 'drizzle.adapter.ts'), content);
+  console.log(chalk.green('  ✓ Drizzle adapter'));
 }
 
 async function generatePrismaAdapter(filtersPath: string): Promise<void> {

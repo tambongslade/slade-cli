@@ -14,7 +14,7 @@ export interface FeatureFlagsOptions {
 
 export async function setupFeatureFlags(
   basePath: string,
-  options: FeatureFlagsOptions = {}
+  options: FeatureFlagsOptions = {},
 ): Promise<void> {
   console.log(chalk.bold.blue('\n🚩 Setting up Feature Flags Framework\n'));
 
@@ -726,53 +726,30 @@ export class ABTestingService {
 }
 
 function generateFeatureFlagEntity(): string {
-  return `import {
-  Entity,
-  PrimaryColumn,
-  Column,
-  CreateDateColumn,
-  UpdateDateColumn,
-} from 'typeorm';
+  return `import { pgTable, text, boolean, doublePrecision, jsonb, timestamp } from 'drizzle-orm/pg-core';
 
-@Entity('feature_flags')
-export class FeatureFlagEntity {
-  @PrimaryColumn()
-  key: string;
+export const featureFlagsTable = pgTable('feature_flags', {
+  key: text('key').primaryKey(),
+  enabled: boolean('enabled').notNull().default(false),
+  description: text('description'),
+  conditions: jsonb('conditions'),
+  variants: jsonb('variants'),
+  percentage: doublePrecision('percentage'),
+  metadata: jsonb('metadata'),
+  createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
+  updatedAt: timestamp('updated_at', { withTimezone: true }).notNull().defaultNow(),
+});
 
-  @Column({ default: false })
-  enabled: boolean;
-
-  @Column({ nullable: true })
-  description: string;
-
-  @Column({ type: 'jsonb', nullable: true })
-  conditions: any;
-
-  @Column({ type: 'jsonb', nullable: true })
-  variants: any;
-
-  @Column({ type: 'float', nullable: true })
-  percentage: number;
-
-  @Column({ type: 'jsonb', nullable: true })
-  metadata: any;
-
-  @CreateDateColumn()
-  createdAt: Date;
-
-  @UpdateDateColumn()
-  updatedAt: Date;
-}
+export type FeatureFlagRow = typeof featureFlagsTable.$inferSelect;
+export type NewFeatureFlagRow = typeof featureFlagsTable.$inferInsert;
 `;
 }
 
 function generateFeatureModule(): string {
   return `import { Module, Global, DynamicModule } from '@nestjs/common';
-import { TypeOrmModule } from '@nestjs/typeorm';
 import { FeatureFlagService } from './feature-flag.service';
 import { FeatureGuard } from './feature.guard';
 import { ABTestingService } from './ab-testing.service';
-import { FeatureFlagEntity } from './feature-flag.entity';
 
 export interface FeatureModuleOptions {
   provider?: 'memory' | 'database' | 'redis';
@@ -783,15 +760,13 @@ export interface FeatureModuleOptions {
 @Module({})
 export class FeatureModule {
   static forRoot(options: FeatureModuleOptions = {}): DynamicModule {
-    const imports = [];
-
-    if (options.provider === 'database') {
-      imports.push(TypeOrmModule.forFeature([FeatureFlagEntity]));
-    }
-
+    // When provider is 'database', FeatureFlagService reads/writes feature
+    // flags through the globally-provided DRIZZLE connection (see
+    // src/shared/database/drizzle.provider.ts) — Drizzle has no
+    // module-scoped repository registration to wire up here.
     return {
       module: FeatureModule,
-      imports,
+      imports: [],
       providers: [
         {
           provide: 'FEATURE_OPTIONS',

@@ -786,13 +786,21 @@ export * from "./database.module";
   }
 
   // drizzle-kit config, so `npx drizzle-kit generate` / `migrate` pick up every
-  // module's schema file without a hand-maintained barrel.
+  // module's schema file without a hand-maintained barrel. Recipes (audit-log,
+  // feature-flags, event-backbone, etc.) also write pgTable schemas under
+  // src/shared/**, using either *.orm-entity.ts or *.entity.ts depending on
+  // the recipe — both patterns are included so those tables aren't silently
+  // skipped by drizzle-kit.
   const drizzleConfigPath = path.join(basePath, 'drizzle.config.ts');
   if (!(await fileExists(drizzleConfigPath))) {
     const drizzleConfigContent = `import { defineConfig } from "drizzle-kit";
 
 export default defineConfig({
-  schema: "./src/modules/**/infrastructure/orm-entities/*.orm-entity.ts",
+  schema: [
+    "./src/modules/**/infrastructure/orm-entities/*.orm-entity.ts",
+    "./src/shared/**/*.orm-entity.ts",
+    "./src/shared/**/*.entity.ts",
+  ],
   out: "./drizzle",
   dialect: "postgresql",
   dbCredentials: {

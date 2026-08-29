@@ -10,12 +10,12 @@ import { ensureDir, writeFile } from '../utils/file.utils';
 
 export interface TestInfrastructureOptions {
   path?: string;
-  orm?: 'typeorm' | 'prisma';
+  orm?: 'drizzle' | 'prisma';
 }
 
 export async function setupTestInfrastructure(
   basePath: string,
-  options: TestInfrastructureOptions = {}
+  options: TestInfrastructureOptions = {},
 ): Promise<void> {
   console.log(chalk.bold.blue('\n🧪 Setting up Test Infrastructure\n'));
 
@@ -51,14 +51,17 @@ export async function setupTestInfrastructure(
   await generateSampleFactories(testPath);
 
   // Generate index
-  await writeFile(path.join(testPath, 'index.ts'), `export * from './factories/base.factory';
+  await writeFile(
+    path.join(testPath, 'index.ts'),
+    `export * from './factories/base.factory';
 export * from './factories/factory.builder';
 export * from './fixtures/fixture.loader';
 export * from './mocks/mock.repository';
 export * from './utils/database.seeder';
 export * from './utils/test-module.builder';
 export * from './utils/test.utils';
-`);
+`,
+  );
 
   console.log(chalk.green('\n✅ Test Infrastructure set up!'));
 }
@@ -737,98 +740,70 @@ export function createJestMockRepository<T extends { id: string | number }>(): {
 }
 
 /**
- * Mock query builder for TypeORM
+ * Mock query builder for Drizzle
+ *
+ * Drizzle's query builder is a fluent, thenable API rather than a class with
+ * simple mockable methods, so it can't be jest.mock()'d the way TypeORM's
+ * Repository could. Instead, every chain method below returns the builder
+ * itself, and awaiting the builder resolves to the configured result — the
+ * same pattern used by the generated repository unit tests.
  */
-export class MockQueryBuilder<T> {
-  private data: T[] = [];
-  private conditions: any[] = [];
-  private orderByFields: any[] = [];
-  private skipCount = 0;
-  private takeCount = 0;
-  private selectedFields: string[] = [];
-  private relations: string[] = [];
-
-  constructor(initialData: T[] = []) {
-    this.data = [...initialData];
-  }
-
-  select(selection: string | string[]): this {
-    this.selectedFields = Array.isArray(selection) ? selection : [selection];
-    return this;
-  }
-
-  where(condition: string, params?: Record<string, any>): this {
-    this.conditions.push({ condition, params });
-    return this;
-  }
-
-  andWhere(condition: string, params?: Record<string, any>): this {
-    return this.where(condition, params);
-  }
-
-  orWhere(condition: string, params?: Record<string, any>): this {
-    return this.where(condition, params);
-  }
-
-  orderBy(field: string, direction: 'ASC' | 'DESC' = 'ASC'): this {
-    this.orderByFields.push({ field, direction });
-    return this;
-  }
-
-  addOrderBy(field: string, direction: 'ASC' | 'DESC' = 'ASC'): this {
-    return this.orderBy(field, direction);
-  }
-
-  skip(count: number): this {
-    this.skipCount = count;
-    return this;
-  }
-
-  take(count: number): this {
-    this.takeCount = count;
-    return this;
-  }
-
-  leftJoinAndSelect(relation: string, alias: string): this {
-    this.relations.push(relation);
-    return this;
-  }
-
-  async getMany(): Promise<T[]> {
-    let result = [...this.data];
-
-    if (this.skipCount > 0) {
-      result = result.slice(this.skipCount);
-    }
-
-    if (this.takeCount > 0) {
-      result = result.slice(0, this.takeCount);
-    }
-
-    return result;
-  }
-
-  async getOne(): Promise<T | null> {
-    return this.data[0] || null;
-  }
-
-  async getManyAndCount(): Promise<[T[], number]> {
-    const data = await this.getMany();
-    return [data, this.data.length];
-  }
-
-  async getCount(): Promise<number> {
-    return this.data.length;
-  }
-
-  setData(data: T[]): this {
-    this.data = data;
-    return this;
-  }
+export interface MockDrizzleQueryBuilder<T> extends PromiseLike<T> {
+  from(...args: any[]): this;
+  where(...args: any[]): this;
+  limit(...args: any[]): this;
+  offset(...args: any[]): this;
+  orderBy(...args: any[]): this;
+  groupBy(...args: any[]): this;
+  values(...args: any[]): this;
+  set(...args: any[]): this;
+  returning(...args: any[]): this;
+  leftJoin(...args: any[]): this;
+  innerJoin(...args: any[]): this;
 }
 
-export function createMockQueryBuilder<T>(data: T[] = []): MockQueryBuilder<T> {
-  return new MockQueryBuilder(data);
+export function createMockQueryBuilder<T>(result: T): MockDrizzleQueryBuilder<T> {
+  const builder: any = {
+    from: jest.fn(() => builder),
+    where: jest.fn(() => builder),
+    limit: jest.fn(() => builder),
+    offset: jest.fn(() => builder),
+    orderBy: jest.fn(() => builder),
+    groupBy: jest.fn(() => builder),
+    values: jest.fn(() => builder),
+    set: jest.fn(() => builder),
+    returning: jest.fn(() => builder),
+    leftJoin: jest.fn(() => builder),
+    innerJoin: jest.fn(() => builder),
+    then: (resolve: (value: T) => any, reject?: (reason?: any) => any) =>
+      Promise.resolve(result).then(resolve, reject),
+  };
+  return builder;
+}
+
+/**
+ * Create a mock DRIZZLE provider value — a plain object with jest.fn()
+ * stand-ins for select/insert/update/delete/execute, ready to configure
+ * per-test via e.g. db.select.mockReturnValue(createMockQueryBuilder([...])).
+ */
+export function createMockDrizzleDb(): {
+  select: jest.Mock;
+  insert: jest.Mock;
+  update: jest.Mock;
+  delete: jest.Mock;
+  execute: jest.Mock;
+  transaction: jest.Mock;
+} {
+  const db = {
+    select: jest.fn(),
+    insert: jest.fn(),
+    update: jest.fn(),
+    delete: jest.fn(),
+    execute: jest.fn(),
+    transaction: jest.fn(),
+  };
+  db.transaction.mockImplementation((fn: (tx: typeof db) => Promise<any>) => fn(db));
+  return db;
 }
 `;
 
@@ -836,37 +811,48 @@ export function createMockQueryBuilder<T>(data: T[] = []): MockQueryBuilder<T> {
   console.log(chalk.green('  ✓ Mock repository'));
 }
 
-async function generateDatabaseSeeder(testPath: string, options: TestInfrastructureOptions): Promise<void> {
-  const content = `import { DataSource, EntityTarget, Repository } from 'typeorm';
+async function generateDatabaseSeeder(
+  testPath: string,
+  _options: TestInfrastructureOptions,
+): Promise<void> {
+  // Note: the seeder is always generated Drizzle-flavored today, matching this
+  // function's pre-existing behavior of ignoring `orm` (it never branched on
+  // TypeORM vs. Prisma either). Add a Prisma branch here if/when this command
+  // needs to support `orm: 'prisma'` projects.
+  const content = `import { sql, getTableName } from 'drizzle-orm';
+import { drizzle } from 'drizzle-orm/postgres-js';
+import postgres from 'postgres';
+import type { PgTable } from 'drizzle-orm/pg-core';
+import type { DrizzleDb } from '@shared/database/drizzle.provider';
 
 export interface SeederOptions {
   truncate?: boolean;
-  order?: string[];
+  order?: PgTable[];
 }
 
 export type SeederFactory<T> = () => T | T[] | Promise<T | T[]>;
 
 export interface SeederDefinition<T = any> {
-  entity: EntityTarget<T>;
+  table: PgTable;
   factory: SeederFactory<T>;
   count?: number;
-  dependencies?: EntityTarget<any>[];
+  dependencies?: PgTable[];
 }
 
 /**
- * Database seeder for test setup
+ * Database seeder for test setup, built on Drizzle's query builder
  */
 export class DatabaseSeeder {
-  private seeders: Map<EntityTarget<any>, SeederDefinition> = new Map();
-  private seededData: Map<EntityTarget<any>, any[]> = new Map();
+  private seeders: Map<PgTable, SeederDefinition> = new Map();
+  private seededData: Map<PgTable, any[]> = new Map();
 
-  constructor(private dataSource: DataSource) {}
+  constructor(private db: DrizzleDb) {}
 
   /**
    * Register a seeder
    */
   register<T>(definition: SeederDefinition<T>): this {
-    this.seeders.set(definition.entity, definition);
+    this.seeders.set(definition.table, definition);
     return this;
   }
 
@@ -880,8 +866,8 @@ export class DatabaseSeeder {
       await this.truncateAll(order);
     }
 
-    for (const entity of order) {
-      const seeder = this.seeders.get(entity);
+    for (const table of order) {
+      const seeder = this.seeders.get(table);
       if (seeder) {
         await this.runSeeder(seeder);
       }
@@ -892,7 +878,6 @@ export class DatabaseSeeder {
    * Run a single seeder
    */
   private async runSeeder<T>(definition: SeederDefinition<T>): Promise<void> {
-    const repository = this.dataSource.getRepository(definition.entity);
     const count = definition.count || 1;
     const data: T[] = [];
 
@@ -902,55 +887,45 @@ export class DatabaseSeeder {
       data.push(...items);
     }
 
-    const saved = await repository.save(data as any);
-    this.seededData.set(definition.entity, Array.isArray(saved) ? saved : [saved]);
+    const saved = await this.db.insert(definition.table).values(data as any).returning();
+    this.seededData.set(definition.table, saved);
   }
 
   /**
-   * Get seeded data for an entity
+   * Get seeded data for a table
    */
-  getSeeded<T>(entity: EntityTarget<T>): T[] {
-    return this.seededData.get(entity) || [];
+  getSeeded<T>(table: PgTable): T[] {
+    return this.seededData.get(table) || [];
   }
 
   /**
    * Get first seeded item
    */
-  getFirst<T>(entity: EntityTarget<T>): T | undefined {
-    return this.getSeeded(entity)[0];
+  getFirst<T>(table: PgTable): T | undefined {
+    return this.getSeeded<T>(table)[0];
   }
 
   /**
-   * Truncate all tables
+   * Truncate all tables (reverse order, to satisfy foreign keys)
    */
-  async truncateAll(order: EntityTarget<any>[]): Promise<void> {
-    // Reverse order for truncation to handle foreign keys
+  async truncateAll(order: PgTable[]): Promise<void> {
     const reversed = [...order].reverse();
 
-    for (const entity of reversed) {
-      const repository = this.dataSource.getRepository(entity);
-      const tableName = repository.metadata.tableName;
-
-      try {
-        await this.dataSource.query(\`TRUNCATE TABLE "\${tableName}" CASCADE\`);
-      } catch {
-        // SQLite doesn't support TRUNCATE
-        await repository.clear();
-      }
+    for (const table of reversed) {
+      await this.db.execute(sql.raw(\`TRUNCATE TABLE "\${getTableName(table)}" CASCADE\`));
     }
   }
 
   /**
-   * Clean up seeded data
+   * Clean up seeded data (deletes only the rows this seeder inserted)
    */
   async cleanup(): Promise<void> {
     const order = this.getSeederOrder().reverse();
 
-    for (const entity of order) {
-      const data = this.seededData.get(entity);
+    for (const table of order) {
+      const data = this.seededData.get(table);
       if (data && data.length > 0) {
-        const repository = this.dataSource.getRepository(entity);
-        await repository.remove(data);
+        await this.db.delete(table);
       }
     }
 
@@ -960,26 +935,26 @@ export class DatabaseSeeder {
   /**
    * Get seeder order based on dependencies
    */
-  private getSeederOrder(): EntityTarget<any>[] {
-    const ordered: EntityTarget<any>[] = [];
-    const visited = new Set<EntityTarget<any>>();
+  private getSeederOrder(): PgTable[] {
+    const ordered: PgTable[] = [];
+    const visited = new Set<PgTable>();
 
-    const visit = (entity: EntityTarget<any>) => {
-      if (visited.has(entity)) return;
-      visited.add(entity);
+    const visit = (table: PgTable) => {
+      if (visited.has(table)) return;
+      visited.add(table);
 
-      const seeder = this.seeders.get(entity);
+      const seeder = this.seeders.get(table);
       if (seeder?.dependencies) {
         for (const dep of seeder.dependencies) {
           visit(dep);
         }
       }
 
-      ordered.push(entity);
+      ordered.push(table);
     };
 
-    for (const entity of this.seeders.keys()) {
-      visit(entity);
+    for (const table of this.seeders.keys()) {
+      visit(table);
     }
 
     return ordered;
@@ -989,52 +964,101 @@ export class DatabaseSeeder {
 /**
  * Create a database seeder
  */
-export function createSeeder(dataSource: DataSource): DatabaseSeeder {
-  return new DatabaseSeeder(dataSource);
+export function createSeeder(db: DrizzleDb): DatabaseSeeder {
+  return new DatabaseSeeder(db);
 }
 
 /**
- * Test database helper
+ * Generic per-table test data factory: inserts rows for integration/e2e
+ * tests and cleans them up afterwards, against a real (test) Postgres
+ * database via an injected DrizzleDb connection.
+ */
+export class TestFactory<TTable extends PgTable> {
+  private inserted: Record<string, any>[] = [];
+
+  constructor(
+    private db: DrizzleDb,
+    private table: TTable,
+  ) {}
+
+  /**
+   * Insert a single row and track it for cleanup
+   */
+  async create<T extends Record<string, any>>(values: T): Promise<T> {
+    const [row] = await this.db.insert(this.table).values(values as any).returning();
+    this.inserted.push(row);
+    return row as T;
+  }
+
+  /**
+   * Insert multiple rows and track them for cleanup
+   */
+  async createMany<T extends Record<string, any>>(rows: T[]): Promise<T[]> {
+    const saved = await this.db.insert(this.table).values(rows as any).returning();
+    this.inserted.push(...saved);
+    return saved as T[];
+  }
+
+  /**
+   * Delete every row this factory has inserted
+   */
+  async cleanup(): Promise<void> {
+    this.inserted = [];
+    await this.truncate();
+  }
+
+  /**
+   * Delete every row in the table
+   */
+  async truncate(): Promise<void> {
+    await this.db.delete(this.table);
+    this.inserted = [];
+  }
+}
+
+export function createTestFactory<TTable extends PgTable>(
+  db: DrizzleDb,
+  table: TTable,
+): TestFactory<TTable> {
+  return new TestFactory(db, table);
+}
+
+/**
+ * Test database helper — connects to a real (disposable) Postgres database.
+ * Drizzle has no in-memory driver, so integration/e2e tests run against a
+ * real test/CI database, e.g. via docker-compose or a Postgres test
+ * container; point DATABASE_URL (or pass a connection string explicitly)
+ * at it.
  */
 export class TestDatabase {
-  private dataSource: DataSource | null = null;
+  private client: ReturnType<typeof postgres> | null = null;
+  private db: DrizzleDb | null = null;
 
-  async connect(options?: any): Promise<DataSource> {
-    this.dataSource = new DataSource({
-      type: 'sqlite',
-      database: ':memory:',
-      synchronize: true,
-      dropSchema: true,
-      logging: false,
-      entities: options?.entities || [],
-      ...options,
-    });
+  async connect(connectionString?: string): Promise<DrizzleDb> {
+    const url = connectionString || process.env.DATABASE_URL;
 
-    await this.dataSource.initialize();
-    return this.dataSource;
+    if (!url) {
+      throw new Error('DATABASE_URL is required to connect to the test database');
+    }
+
+    this.client = postgres(url, { max: 5 });
+    this.db = drizzle(this.client) as DrizzleDb;
+    return this.db;
   }
 
   async disconnect(): Promise<void> {
-    if (this.dataSource?.isInitialized) {
-      await this.dataSource.destroy();
+    if (this.client) {
+      await this.client.end();
     }
+    this.client = null;
+    this.db = null;
   }
 
-  async reset(): Promise<void> {
-    if (this.dataSource?.isInitialized) {
-      await this.dataSource.synchronize(true);
-    }
-  }
-
-  getDataSource(): DataSource {
-    if (!this.dataSource) {
+  getDb(): DrizzleDb {
+    if (!this.db) {
       throw new Error('Database not connected');
     }
-    return this.dataSource;
-  }
-
-  getRepository<T>(entity: EntityTarget<T>): Repository<T> {
-    return this.getDataSource().getRepository(entity);
+    return this.db;
   }
 }
 

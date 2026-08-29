@@ -10,7 +10,7 @@ import { toKebabCase, toPascalCase } from '../utils/naming.utils';
  * Example JSON:
  * {
  *   "module": "users",
- *   "orm": "typeorm",
+ *   "orm": "drizzle",
  *   "entities": [
  *     {
  *       "name": "User",
@@ -49,7 +49,7 @@ export interface SchemaEntity {
 
 export interface SchemaDefinition {
   module: string;
-  orm?: 'typeorm' | 'prisma';
+  orm?: 'drizzle' | 'prisma';
   entities: SchemaEntity[];
   options?: {
     withTests?: boolean;
@@ -63,9 +63,7 @@ export async function generateFromSchema(schemaPath: string, options: any) {
   console.log(chalk.blue(`\n📄 Generating from schema: ${schemaPath}\n`));
 
   const basePath = options.path || process.cwd();
-  const fullSchemaPath = path.isAbsolute(schemaPath)
-    ? schemaPath
-    : path.join(basePath, schemaPath);
+  const fullSchemaPath = path.isAbsolute(schemaPath) ? schemaPath : path.join(basePath, schemaPath);
 
   // Check if schema file exists
   if (!(await fs.pathExists(fullSchemaPath))) {
@@ -79,8 +77,8 @@ export async function generateFromSchema(schemaPath: string, options: any) {
   validateSchema(schema);
 
   console.log(chalk.cyan(`  Module: ${schema.module}`));
-  console.log(chalk.cyan(`  ORM: ${schema.orm || 'typeorm'}`));
-  console.log(chalk.cyan(`  Entities: ${schema.entities.map(e => e.name).join(', ')}`));
+  console.log(chalk.cyan(`  ORM: ${schema.orm || 'drizzle'}`));
+  console.log(chalk.cyan(`  Entities: ${schema.entities.map((e) => e.name).join(', ')}`));
   console.log('');
 
   // Generate each entity
@@ -94,7 +92,7 @@ export async function generateFromSchema(schemaPath: string, options: any) {
     const entityOptions = {
       ...options,
       module: schema.module,
-      orm: schema.orm || 'typeorm',
+      orm: schema.orm || 'drizzle',
       fields: fieldsString,
       skipOrm: entity.skipOrm,
       skipMapper: entity.skipMapper,
@@ -113,9 +111,11 @@ export async function generateFromSchema(schemaPath: string, options: any) {
   // Show summary
   console.log(chalk.cyan(`\n📁 Generated structure:`));
   console.log(`   ${chalk.white('Module:')} ${toKebabCase(schema.module)}`);
-  console.log(`   ${chalk.white('ORM:')} ${schema.orm || 'typeorm'}`);
+  console.log(`   ${chalk.white('ORM:')} ${schema.orm || 'drizzle'}`);
   for (const entity of schema.entities) {
-    console.log(`   ${chalk.white('Entity:')} ${toPascalCase(entity.name)} (${entity.fields.length} fields)`);
+    console.log(
+      `   ${chalk.white('Entity:')} ${toPascalCase(entity.name)} (${entity.fields.length} fields)`,
+    );
   }
 }
 
@@ -133,7 +133,9 @@ async function loadSchema(schemaPath: string): Promise<SchemaDefinition> {
       const yaml = require('yaml');
       return yaml.parse(content);
     } catch {
-      throw new Error('YAML parsing requires the "yaml" package. Install it with: npm install yaml');
+      throw new Error(
+        'YAML parsing requires the "yaml" package. Install it with: npm install yaml',
+      );
     }
   } else {
     throw new Error(`Unsupported schema file format: ${ext}. Use .json or .yaml`);
@@ -163,10 +165,14 @@ function validateSchema(schema: SchemaDefinition): void {
         throw new Error(`All fields in entity "${entity.name}" must have a "name" property`);
       }
       if (!field.type) {
-        throw new Error(`Field "${field.name}" in entity "${entity.name}" must have a "type" property`);
+        throw new Error(
+          `Field "${field.name}" in entity "${entity.name}" must have a "type" property`,
+        );
       }
       if (field.type === 'enum' && (!field.values || field.values.length === 0)) {
-        throw new Error(`Enum field "${field.name}" in entity "${entity.name}" must have "values" array`);
+        throw new Error(
+          `Enum field "${field.name}" in entity "${entity.name}" must have "values" array`,
+        );
       }
     }
   }
@@ -174,7 +180,7 @@ function validateSchema(schema: SchemaDefinition): void {
 
 function convertFieldsToString(fields: SchemaField[]): string {
   return fields
-    .map(field => {
+    .map((field) => {
       let fieldStr = `${field.name}:${field.type}`;
 
       const modifiers: string[] = [];
@@ -199,13 +205,11 @@ function convertFieldsToString(fields: SchemaField[]): string {
  */
 export async function createSampleSchema(outputPath: string, options: any) {
   const basePath = options.path || process.cwd();
-  const fullOutputPath = path.isAbsolute(outputPath)
-    ? outputPath
-    : path.join(basePath, outputPath);
+  const fullOutputPath = path.isAbsolute(outputPath) ? outputPath : path.join(basePath, outputPath);
 
   const sampleSchema: SchemaDefinition = {
     module: 'users',
-    orm: 'typeorm',
+    orm: 'drizzle',
     entities: [
       {
         name: 'User',
@@ -244,7 +248,9 @@ export async function createSampleSchema(outputPath: string, options: any) {
       const yaml = require('yaml');
       await fs.outputFile(fullOutputPath, yaml.stringify(sampleSchema));
     } catch {
-      throw new Error('YAML writing requires the "yaml" package. Install it with: npm install yaml');
+      throw new Error(
+        'YAML writing requires the "yaml" package. Install it with: npm install yaml',
+      );
     }
   } else {
     await fs.outputFile(fullOutputPath, JSON.stringify(sampleSchema, null, 2));

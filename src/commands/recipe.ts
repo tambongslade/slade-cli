@@ -181,9 +181,8 @@ const AVAILABLE_RECIPES = {
     dependencies: [
       '@nestjs/config',
       '@nestjs/schedule',
-      '@nestjs/typeorm',
-      'typeorm',
-      'pg',
+      'drizzle-orm',
+      'postgres',
       'pulsar-client',
       'joi',
     ],
@@ -634,84 +633,148 @@ async function applySoftDeleteRecipe(basePath: string) {
 
   await ensureDir(basePath2);
 
-  const baseEntityContent = `import {
-  PrimaryGeneratedColumn,
-  CreateDateColumn,
-  UpdateDateColumn,
-  DeleteDateColumn,
-  Column,
-} from "typeorm";
+  const baseEntityContent = `import { pgTable, uuid, boolean, timestamp } from "drizzle-orm/pg-core";
 
-export abstract class BaseOrmEntity {
-  @PrimaryGeneratedColumn("uuid")
+/**
+ * Reusable base columns for a soft-deletable Drizzle table.
+ * Spread these into \`pgTable(name, { ...baseOrmColumns, ...yourColumns })\`.
+ */
+export const baseOrmColumns = {
+  id: uuid("id").defaultRandom().primaryKey(),
+  isActive: boolean("is_active").notNull().default(true),
+  createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
+  deletedAt: timestamp("deleted_at", { withTimezone: true }),
+};
+
+/**
+ * Row shape produced by any table built from {@link baseOrmColumns}.
+ */
+export interface BaseOrmRow {
   id: string;
-
-  @Column({ name: "is_active", default: true })
   isActive: boolean;
-
-  @CreateDateColumn({ name: "created_at" })
   createdAt: Date;
-
-  @UpdateDateColumn({ name: "updated_at" })
   updatedAt: Date;
-
-  @DeleteDateColumn({ name: "deleted_at" })
-  deletedAt?: Date;
+  deletedAt: Date | null;
 }
 `;
   await writeFile(path.join(basePath2, 'base-orm.entity.ts'), baseEntityContent);
 
-  const baseRepoContent = `import { Repository, FindOptionsWhere, DeepPartial } from "typeorm";
-import { BaseOrmEntity } from "./base-orm.entity";
+  const baseRepoContent = `import { and, eq, isNull, SQL } from "drizzle-orm";
+import type { PgTableWithColumns, TableConfig } from "drizzle-orm/pg-core";
+import { DrizzleDb } from "@shared/database/drizzle.provider";
+import { BaseOrmRow } from "./base-orm.entity";
 
-export abstract class BaseRepository<T extends BaseOrmEntity> {
-  constructor(protected readonly repository: Repository<T>) {}
+/**
+ * Any Drizzle table built from {@link baseOrmColumns} (id, isActive,
+ * createdAt, updatedAt, deletedAt).
+ */
+export type SoftDeletableTable = PgTableWithColumns<
+  TableConfig & {
+    columns: {
+      id: any;
+      isActive: any;
+      deletedAt: any;
+    };
+  }
+>;
 
-  async findById(id: string): Promise<T | null> {
-    return this.repository.findOne({
-      where: { id, deletedAt: null } as FindOptionsWhere<T>,
-    });
+/** Adds a "not soft-deleted" predicate to an existing where clause. */
+export function withoutSoftDeleted<T extends SoftDeletableTable>(
+  table: T,
+  where?: SQL
+): SQL | undefined {
+  const notDeleted = isNull(table.deletedAt);
+  return where ? and(where, notDeleted) : notDeleted;
+}
+
+/** Marks a row as soft-deleted (sets deletedAt + isActive = false). */
+export async function softDelete<T extends SoftDeletableTable>(
+  db: DrizzleDb,
+  table: T,
+  id: string
+): Promise<void> {
+  await db
+    .update(table)
+    .set({ deletedAt: new Date(), isActive: false } as any)
+    .where(eq(table.id, id));
+}
+
+/** Restores a previously soft-deleted row. */
+export async function restore<T extends SoftDeletableTable>(
+  db: DrizzleDb,
+  table: T,
+  id: string
+): Promise<void> {
+  await db
+    .update(table)
+    .set({ deletedAt: null, isActive: true } as any)
+    .where(eq(table.id, id));
+}
+
+export abstract class BaseRepository<TRow extends BaseOrmRow, TTable extends SoftDeletableTable> {
+  constructor(
+    protected readonly db: DrizzleDb,
+    protected readonly table: TTable
+  ) {}
+
+  async findById(id: string): Promise<TRow | null> {
+    const [row] = await this.db
+      .select()
+      .from(this.table as any)
+      .where(and(eq(this.table.id, id), isNull(this.table.deletedAt)))
+      .limit(1);
+
+    return (row as TRow) ?? null;
   }
 
-  async findAll(): Promise<T[]> {
-    return this.repository.find({
-      where: { deletedAt: null } as FindOptionsWhere<T>,
-    });
+  async findAll(): Promise<TRow[]> {
+    const rows = await this.db
+      .select()
+      .from(this.table as any)
+      .where(isNull(this.table.deletedAt));
+
+    return rows as TRow[];
   }
 
-  async create(data: DeepPartial<T>): Promise<T> {
-    const entity = this.repository.create(data);
-    return this.repository.save(entity);
+  async create(data: Partial<TRow>): Promise<TRow> {
+    const [row] = await this.db
+      .insert(this.table as any)
+      .values(data as any)
+      .returning();
+
+    return row as TRow;
   }
 
-  async update(id: string, data: DeepPartial<T>): Promise<T | null> {
-    await this.repository.update(id, data as any);
+  async update(id: string, data: Partial<TRow>): Promise<TRow | null> {
+    await this.db
+      .update(this.table as any)
+      .set(data as any)
+      .where(eq(this.table.id, id));
+
     return this.findById(id);
   }
 
   async softDelete(id: string): Promise<void> {
-    await this.repository.update(id, {
-      deletedAt: new Date(),
-      isActive: false,
-    } as any);
+    await softDelete(this.db, this.table, id);
   }
 
   async hardDelete(id: string): Promise<void> {
-    await this.repository.delete(id);
+    await this.db.delete(this.table as any).where(eq(this.table.id, id));
   }
 
   async restore(id: string): Promise<void> {
-    await this.repository.update(id, {
-      deletedAt: null,
-      isActive: true,
-    } as any);
+    await restore(this.db, this.table, id);
   }
 
   async exists(id: string): Promise<boolean> {
-    const count = await this.repository.count({
-      where: { id, deletedAt: null } as FindOptionsWhere<T>,
-    });
-    return count > 0;
+    const [row] = await this.db
+      .select({ id: this.table.id })
+      .from(this.table as any)
+      .where(and(eq(this.table.id, id), isNull(this.table.deletedAt)))
+      .limit(1);
+
+    return !!row;
   }
 }
 `;
@@ -722,8 +785,8 @@ export * from "./base.repository";
 `;
   await writeFile(path.join(basePath2, 'index.ts'), indexContent);
 
-  console.log(chalk.green('  ✓ BaseOrmEntity with soft delete'));
-  console.log(chalk.green('  ✓ BaseRepository with CRUD + soft delete'));
+  console.log(chalk.green('  ✓ baseOrmColumns with soft delete'));
+  console.log(chalk.green('  ✓ BaseRepository with CRUD + soft delete (Drizzle)'));
 }
 
 async function applyAuditLogRecipe(basePath: string) {
@@ -732,51 +795,31 @@ async function applyAuditLogRecipe(basePath: string) {
 
   await ensureDir(auditPath);
 
-  const auditEntityContent = `import {
-  Entity,
-  PrimaryGeneratedColumn,
-  Column,
-  CreateDateColumn,
-} from "typeorm";
+  const auditEntityContent = `import { pgTable, uuid, text, jsonb, timestamp } from "drizzle-orm/pg-core";
 
 export type AuditAction = "CREATE" | "UPDATE" | "DELETE" | "RESTORE";
 
-@Entity("audit_logs")
-export class AuditLogEntity {
-  @PrimaryGeneratedColumn("uuid")
-  id: string;
+export const auditLogsTable = pgTable("audit_logs", {
+  id: uuid("id").defaultRandom().primaryKey(),
+  entityName: text("entity_name").notNull(),
+  entityId: text("entity_id").notNull(),
+  action: text("action").$type<AuditAction>().notNull(),
+  oldValues: jsonb("old_values").$type<Record<string, any>>(),
+  newValues: jsonb("new_values").$type<Record<string, any>>(),
+  userId: text("user_id"),
+  userEmail: text("user_email"),
+  createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+});
 
-  @Column()
-  entityName: string;
-
-  @Column()
-  entityId: string;
-
-  @Column()
-  action: AuditAction;
-
-  @Column({ type: "jsonb", nullable: true })
-  oldValues?: Record<string, any>;
-
-  @Column({ type: "jsonb", nullable: true })
-  newValues?: Record<string, any>;
-
-  @Column({ nullable: true })
-  userId?: string;
-
-  @Column({ nullable: true })
-  userEmail?: string;
-
-  @CreateDateColumn()
-  createdAt: Date;
-}
+export type AuditLogRow = typeof auditLogsTable.$inferSelect;
+export type NewAuditLogRow = typeof auditLogsTable.$inferInsert;
 `;
   await writeFile(path.join(auditPath, 'audit-log.entity.ts'), auditEntityContent);
 
-  const auditServiceContent = `import { Injectable } from "@nestjs/common";
-import { InjectRepository } from "@nestjs/typeorm";
-import { Repository } from "typeorm";
-import { AuditLogEntity, AuditAction } from "./audit-log.entity";
+  const auditServiceContent = `import { Inject, Injectable } from "@nestjs/common";
+import { and, desc, eq } from "drizzle-orm";
+import { DRIZZLE, DrizzleDb } from "@shared/database/drizzle.provider";
+import { auditLogsTable, AuditLogRow, AuditAction } from "./audit-log.entity";
 
 export interface AuditContext {
   userId?: string;
@@ -785,10 +828,7 @@ export interface AuditContext {
 
 @Injectable()
 export class AuditService {
-  constructor(
-    @InjectRepository(AuditLogEntity)
-    private readonly auditRepository: Repository<AuditLogEntity>
-  ) {}
+  constructor(@Inject(DRIZZLE) private readonly db: DrizzleDb) {}
 
   async log(
     entityName: string,
@@ -798,7 +838,7 @@ export class AuditService {
     newValues: Record<string, any> | null,
     context?: AuditContext
   ): Promise<void> {
-    const auditLog = this.auditRepository.create({
+    await this.db.insert(auditLogsTable).values({
       entityName,
       entityId,
       action,
@@ -807,15 +847,14 @@ export class AuditService {
       userId: context?.userId,
       userEmail: context?.userEmail,
     });
-
-    await this.auditRepository.save(auditLog);
   }
 
-  async getAuditHistory(entityName: string, entityId: string): Promise<AuditLogEntity[]> {
-    return this.auditRepository.find({
-      where: { entityName, entityId },
-      order: { createdAt: "DESC" },
-    });
+  async getAuditHistory(entityName: string, entityId: string): Promise<AuditLogRow[]> {
+    return this.db
+      .select()
+      .from(auditLogsTable)
+      .where(and(eq(auditLogsTable.entityName, entityName), eq(auditLogsTable.entityId, entityId)))
+      .orderBy(desc(auditLogsTable.createdAt));
   }
 }
 `;
@@ -826,7 +865,7 @@ export * from "./audit.service";
 `;
   await writeFile(path.join(auditPath, 'index.ts'), indexContent);
 
-  console.log(chalk.green('  ✓ AuditLogEntity'));
+  console.log(chalk.green('  ✓ auditLogsTable (Drizzle)'));
   console.log(chalk.green('  ✓ AuditService'));
 }
 
@@ -1390,14 +1429,8 @@ async function applyWebhooksRecipe(basePath: string) {
 
   await ensureDir(webhookPath);
 
-  // Webhook entity
-  const webhookEntityContent = `import {
-  Entity,
-  PrimaryGeneratedColumn,
-  Column,
-  CreateDateColumn,
-  UpdateDateColumn,
-} from "typeorm";
+  // Webhook table
+  const webhookEntityContent = `import { pgTable, uuid, text, boolean, integer, timestamp } from "drizzle-orm/pg-core";
 
 export type WebhookEvent =
   | "entity.created"
@@ -1407,99 +1440,56 @@ export type WebhookEvent =
   | "order.completed"
   | "payment.received";
 
-@Entity("webhooks")
-export class WebhookEntity {
-  @PrimaryGeneratedColumn("uuid")
-  id: string;
+export const webhooksTable = pgTable("webhooks", {
+  id: uuid("id").defaultRandom().primaryKey(),
+  name: text("name").notNull(),
+  url: text("url").notNull(),
+  events: text("events").array().$type<WebhookEvent[]>().notNull(),
+  secret: text("secret"),
+  isActive: boolean("is_active").notNull().default(true),
+  failureCount: integer("failure_count").notNull().default(0),
+  lastTriggeredAt: timestamp("last_triggered_at", { withTimezone: true }),
+  createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
+});
 
-  @Column()
-  name: string;
-
-  @Column()
-  url: string;
-
-  @Column("simple-array")
-  events: WebhookEvent[];
-
-  @Column({ nullable: true })
-  secret?: string;
-
-  @Column({ default: true })
-  isActive: boolean;
-
-  @Column({ default: 0 })
-  failureCount: number;
-
-  @Column({ type: "timestamp", nullable: true })
-  lastTriggeredAt?: Date;
-
-  @CreateDateColumn()
-  createdAt: Date;
-
-  @UpdateDateColumn()
-  updatedAt: Date;
-}
+export type WebhookRow = typeof webhooksTable.$inferSelect;
+export type NewWebhookRow = typeof webhooksTable.$inferInsert;
 `;
   await writeFile(path.join(webhookPath, 'webhook.entity.ts'), webhookEntityContent);
 
-  // Webhook delivery entity
-  const deliveryEntityContent = `import {
-  Entity,
-  PrimaryGeneratedColumn,
-  Column,
-  CreateDateColumn,
-  ManyToOne,
-  JoinColumn,
-} from "typeorm";
-import { WebhookEntity } from "./webhook.entity";
+  // Webhook delivery table
+  const deliveryEntityContent = `import { pgTable, uuid, text, jsonb, integer, timestamp } from "drizzle-orm/pg-core";
+import { webhooksTable } from "./webhook.entity";
 
 export type DeliveryStatus = "pending" | "success" | "failed" | "retrying";
 
-@Entity("webhook_deliveries")
-export class WebhookDeliveryEntity {
-  @PrimaryGeneratedColumn("uuid")
-  id: string;
+export const webhookDeliveriesTable = pgTable("webhook_deliveries", {
+  id: uuid("id").defaultRandom().primaryKey(),
+  webhookId: uuid("webhook_id")
+    .notNull()
+    .references(() => webhooksTable.id),
+  event: text("event").notNull(),
+  payload: jsonb("payload").$type<Record<string, any>>().notNull(),
+  status: text("status").$type<DeliveryStatus>().notNull().default("pending"),
+  responseStatus: integer("response_status"),
+  responseBody: text("response_body"),
+  attempts: integer("attempts").notNull().default(0),
+  nextRetryAt: timestamp("next_retry_at", { withTimezone: true }),
+  createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+});
 
-  @ManyToOne(() => WebhookEntity)
-  @JoinColumn({ name: "webhook_id" })
-  webhook: WebhookEntity;
-
-  @Column()
-  webhookId: string;
-
-  @Column()
-  event: string;
-
-  @Column({ type: "jsonb" })
-  payload: Record<string, any>;
-
-  @Column({ default: "pending" })
-  status: DeliveryStatus;
-
-  @Column({ nullable: true })
-  responseStatus?: number;
-
-  @Column({ type: "text", nullable: true })
-  responseBody?: string;
-
-  @Column({ default: 0 })
-  attempts: number;
-
-  @Column({ type: "timestamp", nullable: true })
-  nextRetryAt?: Date;
-
-  @CreateDateColumn()
-  createdAt: Date;
-}
+export type WebhookDeliveryRow = typeof webhookDeliveriesTable.$inferSelect;
+export type NewWebhookDeliveryRow = typeof webhookDeliveriesTable.$inferInsert;
 `;
   await writeFile(path.join(webhookPath, 'webhook-delivery.entity.ts'), deliveryEntityContent);
 
   // Webhook service
-  const webhookServiceContent = `import { Injectable, Logger } from "@nestjs/common";
-import { InjectRepository } from "@nestjs/typeorm";
-import { Repository } from "typeorm";
-import { WebhookEntity, WebhookEvent } from "./webhook.entity";
-import { WebhookDeliveryEntity } from "./webhook-delivery.entity";
+  const webhookServiceContent = `import { Inject, Injectable, Logger } from "@nestjs/common";
+import { desc, eq } from "drizzle-orm";
+import { DRIZZLE, DrizzleDb } from "@shared/database/drizzle.provider";
+import { webhooksTable, WebhookRow, WebhookEvent } from "./webhook.entity";
+import { webhookDeliveriesTable, WebhookDeliveryRow } from "./webhook-delivery.entity";
 import axios from "axios";
 import * as crypto from "crypto";
 
@@ -1509,34 +1499,34 @@ export class WebhookService {
   private readonly maxRetries = 3;
   private readonly retryDelays = [60, 300, 900]; // seconds
 
-  constructor(
-    @InjectRepository(WebhookEntity)
-    private readonly webhookRepo: Repository<WebhookEntity>,
-    @InjectRepository(WebhookDeliveryEntity)
-    private readonly deliveryRepo: Repository<WebhookDeliveryEntity>
-  ) {}
+  constructor(@Inject(DRIZZLE) private readonly db: DrizzleDb) {}
 
   async registerWebhook(
     name: string,
     url: string,
     events: WebhookEvent[],
     secret?: string
-  ): Promise<WebhookEntity> {
-    const webhook = this.webhookRepo.create({
-      name,
-      url,
-      events,
-      secret: secret || this.generateSecret(),
-    });
-    return this.webhookRepo.save(webhook);
+  ): Promise<WebhookRow> {
+    const [webhook] = await this.db
+      .insert(webhooksTable)
+      .values({
+        name,
+        url,
+        events,
+        secret: secret || this.generateSecret(),
+      })
+      .returning();
+
+    return webhook;
   }
 
   async trigger(event: WebhookEvent, payload: Record<string, any>): Promise<void> {
-    const webhooks = await this.webhookRepo.find({
-      where: { isActive: true },
-    });
+    const webhooks = await this.db
+      .select()
+      .from(webhooksTable)
+      .where(eq(webhooksTable.isActive, true));
 
-    const relevantWebhooks = webhooks.filter((w) => w.events.includes(event));
+    const relevantWebhooks = webhooks.filter((w: WebhookRow) => w.events.includes(event));
 
     for (const webhook of relevantWebhooks) {
       await this.deliver(webhook, event, payload);
@@ -1544,27 +1534,29 @@ export class WebhookService {
   }
 
   private async deliver(
-    webhook: WebhookEntity,
+    webhook: WebhookRow,
     event: string,
     payload: Record<string, any>
   ): Promise<void> {
-    const delivery = this.deliveryRepo.create({
-      webhookId: webhook.id,
-      event,
-      payload,
-      status: "pending",
-    });
-    await this.deliveryRepo.save(delivery);
+    const [delivery] = await this.db
+      .insert(webhookDeliveriesTable)
+      .values({
+        webhookId: webhook.id,
+        event,
+        payload,
+        status: "pending",
+      })
+      .returning();
 
     await this.attemptDelivery(webhook, delivery);
   }
 
   private async attemptDelivery(
-    webhook: WebhookEntity,
-    delivery: WebhookDeliveryEntity
+    webhook: WebhookRow,
+    delivery: WebhookDeliveryRow
   ): Promise<void> {
     try {
-      const signature = this.generateSignature(delivery.payload, webhook.secret);
+      const signature = this.generateSignature(delivery.payload, webhook.secret ?? undefined);
 
       const response = await axios.post(webhook.url, delivery.payload, {
         headers: {
@@ -1576,44 +1568,60 @@ export class WebhookService {
         timeout: 30000,
       });
 
-      delivery.status = "success";
-      delivery.responseStatus = response.status;
-      delivery.responseBody = JSON.stringify(response.data).slice(0, 1000);
-      delivery.attempts += 1;
-
-      webhook.lastTriggeredAt = new Date();
-      webhook.failureCount = 0;
-
       await Promise.all([
-        this.deliveryRepo.save(delivery),
-        this.webhookRepo.save(webhook),
+        this.db
+          .update(webhookDeliveriesTable)
+          .set({
+            status: "success",
+            responseStatus: response.status,
+            responseBody: JSON.stringify(response.data).slice(0, 1000),
+            attempts: delivery.attempts + 1,
+          })
+          .where(eq(webhookDeliveriesTable.id, delivery.id)),
+        this.db
+          .update(webhooksTable)
+          .set({ lastTriggeredAt: new Date(), failureCount: 0 })
+          .where(eq(webhooksTable.id, webhook.id)),
       ]);
 
       this.logger.log(\`Webhook delivered successfully: \${delivery.id}\`);
     } catch (error: any) {
-      delivery.attempts += 1;
-      delivery.responseStatus = error.response?.status;
-      delivery.responseBody = error.message;
+      const attempts = delivery.attempts + 1;
+      const failureCount = webhook.failureCount + 1;
+      const disable = failureCount >= 10;
 
-      if (delivery.attempts < this.maxRetries) {
-        delivery.status = "retrying";
-        delivery.nextRetryAt = new Date(
-          Date.now() + this.retryDelays[delivery.attempts - 1] * 1000
-        );
+      if (attempts < this.maxRetries) {
+        await this.db
+          .update(webhookDeliveriesTable)
+          .set({
+            status: "retrying",
+            responseStatus: error.response?.status,
+            responseBody: error.message,
+            attempts,
+            nextRetryAt: new Date(Date.now() + this.retryDelays[attempts - 1] * 1000),
+          })
+          .where(eq(webhookDeliveriesTable.id, delivery.id));
       } else {
-        delivery.status = "failed";
-        webhook.failureCount += 1;
+        await Promise.all([
+          this.db
+            .update(webhookDeliveriesTable)
+            .set({
+              status: "failed",
+              responseStatus: error.response?.status,
+              responseBody: error.message,
+              attempts,
+            })
+            .where(eq(webhookDeliveriesTable.id, delivery.id)),
+          this.db
+            .update(webhooksTable)
+            .set({ failureCount, isActive: disable ? false : webhook.isActive })
+            .where(eq(webhooksTable.id, webhook.id)),
+        ]);
 
-        if (webhook.failureCount >= 10) {
-          webhook.isActive = false;
+        if (disable) {
           this.logger.warn(\`Webhook disabled due to failures: \${webhook.id}\`);
         }
       }
-
-      await Promise.all([
-        this.deliveryRepo.save(delivery),
-        this.webhookRepo.save(webhook),
-      ]);
 
       this.logger.error(\`Webhook delivery failed: \${delivery.id}\`, error.message);
     }
@@ -1642,34 +1650,39 @@ export class WebhookService {
     );
   }
 
-  async getDeliveries(webhookId: string): Promise<WebhookDeliveryEntity[]> {
-    return this.deliveryRepo.find({
-      where: { webhookId },
-      order: { createdAt: "DESC" },
-      take: 100,
-    });
+  async getDeliveries(webhookId: string): Promise<WebhookDeliveryRow[]> {
+    return this.db
+      .select()
+      .from(webhookDeliveriesTable)
+      .where(eq(webhookDeliveriesTable.webhookId, webhookId))
+      .orderBy(desc(webhookDeliveriesTable.createdAt))
+      .limit(100);
   }
 
   async retryDelivery(deliveryId: string): Promise<void> {
-    const delivery = await this.deliveryRepo.findOne({
-      where: { id: deliveryId },
-      relations: ["webhook"],
-    });
+    const [delivery] = await this.db
+      .select()
+      .from(webhookDeliveriesTable)
+      .where(eq(webhookDeliveriesTable.id, deliveryId))
+      .limit(1);
 
     if (!delivery) {
       throw new Error("Delivery not found");
     }
 
-    delivery.status = "pending";
-    delivery.attempts = 0;
-    await this.deliveryRepo.save(delivery);
+    await this.db
+      .update(webhookDeliveriesTable)
+      .set({ status: "pending", attempts: 0 })
+      .where(eq(webhookDeliveriesTable.id, deliveryId));
 
-    const webhook = await this.webhookRepo.findOne({
-      where: { id: delivery.webhookId },
-    });
+    const [webhook] = await this.db
+      .select()
+      .from(webhooksTable)
+      .where(eq(webhooksTable.id, delivery.webhookId))
+      .limit(1);
 
     if (webhook) {
-      await this.attemptDelivery(webhook, delivery);
+      await this.attemptDelivery(webhook, { ...delivery, status: "pending", attempts: 0 });
     }
   }
 }
@@ -2011,31 +2024,36 @@ export class UserBuilder extends TestDataBuilder<{
   await writeFile(path.join(factoriesPath, 'builder.ts'), builderContent);
 
   // Database fixture utilities
-  const fixtureUtilsContent = `import { DataSource, Repository, ObjectLiteral } from "typeorm";
+  const fixtureUtilsContent = `import { sql } from "drizzle-orm";
+import type { PgTable } from "drizzle-orm/pg-core";
+import { DrizzleDb } from "@shared/database/drizzle.provider";
 
 /**
  * Database Fixture Manager
  *
- * Handles test database setup, seeding, and cleanup
+ * Handles test database seeding and cleanup on top of Drizzle.
  */
 export class FixtureManager {
   private loadedFixtures: Map<string, any[]> = new Map();
 
-  constructor(private dataSource: DataSource) {}
+  constructor(private db: DrizzleDb) {}
 
   /**
-   * Load fixtures from a fixture class
+   * Insert fixture rows into a table and track them by name
    */
-  async load<T extends ObjectLiteral>(
-    repository: Repository<T>,
+  async load<T extends Record<string, unknown>>(
+    table: PgTable,
+    tableName: string,
     data: Partial<T>[]
   ): Promise<T[]> {
-    const entities = data.map((item) => repository.create(item));
-    const saved = await repository.save(entities);
+    if (data.length === 0) {
+      return [];
+    }
 
-    const key = repository.metadata.name;
-    this.loadedFixtures.set(key, [
-      ...(this.loadedFixtures.get(key) || []),
+    const saved = (await this.db.insert(table).values(data as any).returning()) as T[];
+
+    this.loadedFixtures.set(tableName, [
+      ...(this.loadedFixtures.get(tableName) || []),
       ...saved,
     ]);
 
@@ -2043,49 +2061,47 @@ export class FixtureManager {
   }
 
   /**
-   * Get loaded fixtures by entity name
+   * Get loaded fixtures by table name
    */
-  get<T>(entityName: string): T[] {
-    return (this.loadedFixtures.get(entityName) || []) as T[];
+  get<T>(tableName: string): T[] {
+    return (this.loadedFixtures.get(tableName) || []) as T[];
   }
 
   /**
-   * Clear all data from specified tables
+   * Clear all rows from a specific table
    */
-  async clear(...entityNames: string[]): Promise<void> {
-    for (const name of entityNames) {
-      const repository = this.dataSource.getRepository(name);
-      await repository.clear();
-      this.loadedFixtures.delete(name);
-    }
+  async clear(table: PgTable, tableName: string): Promise<void> {
+    await this.db.delete(table);
+    this.loadedFixtures.delete(tableName);
   }
 
   /**
-   * Clear all loaded fixtures
+   * Clear all loaded fixtures across the given tables
    */
-  async clearAll(): Promise<void> {
+  async clearAll(tables: Record<string, PgTable>): Promise<void> {
     // Disable foreign key checks temporarily
-    await this.dataSource.query("SET CONSTRAINTS ALL DEFERRED");
+    await this.db.execute(sql\`SET CONSTRAINTS ALL DEFERRED\`);
 
-    for (const [name] of this.loadedFixtures) {
+    for (const [name, table] of Object.entries(tables)) {
       try {
-        const repository = this.dataSource.getRepository(name);
-        await repository.clear();
+        await this.db.delete(table);
       } catch (error) {
         console.warn(\`Failed to clear \${name}:\`, error);
       }
     }
 
-    await this.dataSource.query("SET CONSTRAINTS ALL IMMEDIATE");
+    await this.db.execute(sql\`SET CONSTRAINTS ALL IMMEDIATE\`);
     this.loadedFixtures.clear();
   }
 
   /**
-   * Reset database to clean state
+   * Reset tracked fixture state. Schema itself is managed by
+   * drizzle-kit migrations, not this helper — run
+   * \`npx drizzle-kit push\` (or your migration runner) separately
+   * if the schema needs to be reset too.
    */
-  async reset(): Promise<void> {
-    await this.clearAll();
-    await this.dataSource.synchronize(true);
+  async reset(tables: Record<string, PgTable>): Promise<void> {
+    await this.clearAll(tables);
   }
 }
 
@@ -2094,7 +2110,7 @@ export class FixtureManager {
  */
 export interface Fixture<T = any> {
   name: string;
-  entity: new () => T;
+  table: PgTable;
   data: () => Partial<T>[];
   dependencies?: string[];
 }
@@ -2111,11 +2127,7 @@ export class FixtureLoader {
     return this;
   }
 
-  async load(
-    name: string,
-    manager: FixtureManager,
-    dataSource: DataSource
-  ): Promise<any[]> {
+  async load(name: string, manager: FixtureManager): Promise<any[]> {
     if (this.loaded.has(name)) {
       return manager.get(name);
     }
@@ -2128,12 +2140,11 @@ export class FixtureLoader {
     // Load dependencies first
     if (fixture.dependencies) {
       for (const dep of fixture.dependencies) {
-        await this.load(dep, manager, dataSource);
+        await this.load(dep, manager);
       }
     }
 
-    const repository = dataSource.getRepository(fixture.entity);
-    const result = await manager.load(repository, fixture.data());
+    const result = await manager.load(fixture.table, fixture.name, fixture.data());
     this.loaded.add(name);
 
     return result;
@@ -2157,7 +2168,7 @@ import { Fixture } from "./fixture.utils";
 
 export const usersFixture: Fixture = {
   name: "users",
-  entity: class User {} as any, // Replace with actual entity
+  table: {} as any, // Replace with your actual Drizzle table, e.g. usersTable
   data: () => [
     {
       id: "user-1",
@@ -2188,7 +2199,7 @@ export const usersFixture: Fixture = {
 
 export const postsFixture: Fixture = {
   name: "posts",
-  entity: class Post {} as any, // Replace with actual entity
+  table: {} as any, // Replace with your actual Drizzle table, e.g. postsTable
   dependencies: ["users"],
   data: () => [
     {
@@ -2214,7 +2225,7 @@ export const postsFixture: Fixture = {
 export function generateUsersFixture(count: number): Fixture {
   return {
     name: \`users_\${count}\`,
-    entity: class User {} as any,
+    table: {} as any, // Replace with your actual Drizzle table, e.g. usersTable
     data: () =>
       Array.from({ length: count }, (_, i) => ({
         id: faker.string.uuid(),
@@ -2235,59 +2246,48 @@ export function generateUsersFixture(count: number): Fixture {
  */
 
 /**
- * Create a mock repository with common TypeORM methods
+ * Create a chainable mock Drizzle query builder.
+ *
+ * Mimics the fluent \`.from().where().orderBy()...\` chain Drizzle returns
+ * from \`db.select()/insert()/update()/delete()\` and resolves to \`result\`
+ * when awaited (via \`then\`), the same way a real Drizzle query does.
  */
-export function createMockRepository<T = any>() {
-  return {
-    find: jest.fn().mockResolvedValue([]),
-    findOne: jest.fn().mockResolvedValue(null),
-    findOneBy: jest.fn().mockResolvedValue(null),
-    save: jest.fn().mockImplementation((entity) => Promise.resolve({ id: "mock-id", ...entity })),
-    create: jest.fn().mockImplementation((dto) => dto),
-    update: jest.fn().mockResolvedValue({ affected: 1 }),
-    delete: jest.fn().mockResolvedValue({ affected: 1 }),
-    softDelete: jest.fn().mockResolvedValue({ affected: 1 }),
-    restore: jest.fn().mockResolvedValue({ affected: 1 }),
-    count: jest.fn().mockResolvedValue(0),
-    createQueryBuilder: jest.fn(() => createMockQueryBuilder()),
-    manager: {
-      transaction: jest.fn((cb) => cb({
-        save: jest.fn(),
-        remove: jest.fn(),
-      })),
-    },
+export function createMockQueryBuilder<T = any>(result: T = [] as unknown as T) {
+  const builder: any = {
+    from: jest.fn(() => builder),
+    where: jest.fn(() => builder),
+    orderBy: jest.fn(() => builder),
+    limit: jest.fn(() => builder),
+    offset: jest.fn(() => builder),
+    values: jest.fn(() => builder),
+    set: jest.fn(() => builder),
+    leftJoin: jest.fn(() => builder),
+    innerJoin: jest.fn(() => builder),
+    groupBy: jest.fn(() => builder),
+    having: jest.fn(() => builder),
+    returning: jest.fn().mockResolvedValue(result),
+    then: (resolve: (value: T) => any, reject?: (reason: any) => any) =>
+      Promise.resolve(result).then(resolve, reject),
+    catch: (reject: (reason: any) => any) => Promise.resolve(result).catch(reject),
   };
+  return builder;
 }
 
 /**
- * Create a mock query builder
+ * Create a mock DrizzleDb with the common query methods
+ * (select/insert/update/delete/execute/transaction), each returning a
+ * chainable {@link createMockQueryBuilder} builder.
  */
-export function createMockQueryBuilder<T = any>() {
-  const qb: any = {
-    select: jest.fn().mockReturnThis(),
-    addSelect: jest.fn().mockReturnThis(),
-    where: jest.fn().mockReturnThis(),
-    andWhere: jest.fn().mockReturnThis(),
-    orWhere: jest.fn().mockReturnThis(),
-    orderBy: jest.fn().mockReturnThis(),
-    addOrderBy: jest.fn().mockReturnThis(),
-    skip: jest.fn().mockReturnThis(),
-    take: jest.fn().mockReturnThis(),
-    leftJoin: jest.fn().mockReturnThis(),
-    leftJoinAndSelect: jest.fn().mockReturnThis(),
-    innerJoin: jest.fn().mockReturnThis(),
-    innerJoinAndSelect: jest.fn().mockReturnThis(),
-    groupBy: jest.fn().mockReturnThis(),
-    having: jest.fn().mockReturnThis(),
-    getOne: jest.fn().mockResolvedValue(null),
-    getMany: jest.fn().mockResolvedValue([]),
-    getManyAndCount: jest.fn().mockResolvedValue([[], 0]),
-    getCount: jest.fn().mockResolvedValue(0),
-    getRawOne: jest.fn().mockResolvedValue(null),
-    getRawMany: jest.fn().mockResolvedValue([]),
-    execute: jest.fn().mockResolvedValue({ affected: 1 }),
+export function createMockDrizzleDb() {
+  const db: any = {
+    select: jest.fn(() => createMockQueryBuilder([])),
+    insert: jest.fn(() => createMockQueryBuilder([])),
+    update: jest.fn(() => createMockQueryBuilder([])),
+    delete: jest.fn(() => createMockQueryBuilder(undefined)),
+    execute: jest.fn().mockResolvedValue([]),
+    transaction: jest.fn((cb: (tx: any) => any) => cb(db)),
   };
-  return qb;
+  return db;
 }
 
 /**
@@ -2386,7 +2386,7 @@ export function createMockExecutionContext(request: any = {}, response: any = {}
   // Test setup utilities
   const testSetupContent = `import { Test, TestingModule } from "@nestjs/testing";
 import { INestApplication, ValidationPipe } from "@nestjs/common";
-import { DataSource } from "typeorm";
+import { DrizzleDb } from "@shared/database/drizzle.provider";
 
 /**
  * Test Setup Utilities
@@ -2438,18 +2438,54 @@ export async function createTestApp(
 }
 
 /**
+ * A closable Postgres client, e.g. the \`postgres()\` client that
+ * \`createDrizzleConnection()\` wraps with \`drizzle()\`. DrizzleDb itself
+ * exposes no close method, so hold on to the underlying client in tests
+ * that need to tear the connection down.
+ */
+export interface ClosablePgClient {
+  end: () => Promise<void>;
+}
+
+/**
  * Clean up test resources
  */
 export async function cleanupTest(
   app?: INestApplication,
-  dataSource?: DataSource
+  pgClient?: ClosablePgClient
 ): Promise<void> {
-  if (dataSource?.isInitialized) {
-    await dataSource.destroy();
+  if (pgClient) {
+    await pgClient.end();
   }
   if (app) {
     await app.close();
   }
+}
+
+/**
+ * Run a callback inside a Drizzle transaction that is always rolled back
+ * afterwards, regardless of success or failure. Useful for integration
+ * tests that need automatic cleanup without truncating tables.
+ */
+class RollbackTransactionSignal extends Error {}
+
+export async function withTransactionalRollback<T>(
+  db: DrizzleDb,
+  fn: (tx: DrizzleDb) => Promise<T>
+): Promise<T> {
+  let result: T;
+  try {
+    await db.transaction(async (tx) => {
+      result = await fn(tx as unknown as DrizzleDb);
+      throw new RollbackTransactionSignal();
+    });
+  } catch (error) {
+    if (error instanceof RollbackTransactionSignal) {
+      return result!;
+    }
+    throw error;
+  }
+  return result!;
 }
 
 /**
@@ -2525,7 +2561,7 @@ export * from "./utils";
   console.log(chalk.green('  ✓ Test data builder pattern'));
   console.log(chalk.green('  ✓ Database fixture manager with dependencies'));
   console.log(
-    chalk.green('  ✓ Mock utilities (Repository, QueryBuilder, Prisma, Request/Response)'),
+    chalk.green('  ✓ Mock utilities (DrizzleDb, QueryBuilder, Prisma, Request/Response)'),
   );
   console.log(chalk.green('  ✓ Test setup utilities (createTestApp, cleanup, waitFor, retry)'));
 }
@@ -3133,13 +3169,13 @@ import {
   HealthCheck,
   HealthCheckService,
   HttpHealthIndicator,
-  TypeOrmHealthIndicator,
   MemoryHealthIndicator,
   DiskHealthIndicator,
 } from "@nestjs/terminus";
 import { ApiTags, ApiOperation } from "@nestjs/swagger";
 import { SkipThrottle } from "@nestjs/throttler";
 import { Public } from "../auth/decorators/public.decorator";
+import { DrizzleHealthIndicator } from "./custom.indicators";
 
 @ApiTags("Health")
 @Controller("health")
@@ -3148,7 +3184,7 @@ export class HealthController {
   constructor(
     private health: HealthCheckService,
     private http: HttpHealthIndicator,
-    private db: TypeOrmHealthIndicator,
+    private db: DrizzleHealthIndicator,
     private memory: MemoryHealthIndicator,
     private disk: DiskHealthIndicator
   ) {}
@@ -3159,7 +3195,7 @@ export class HealthController {
   @ApiOperation({ summary: "Basic health check" })
   check() {
     return this.health.check([
-      () => this.db.pingCheck("database"),
+      () => this.db.isHealthy("database"),
     ]);
   }
 
@@ -3169,7 +3205,7 @@ export class HealthController {
   @ApiOperation({ summary: "Readiness check - is the service ready to receive traffic?" })
   readiness() {
     return this.health.check([
-      () => this.db.pingCheck("database"),
+      () => this.db.isHealthy("database"),
       () => this.memory.checkHeap("memory_heap", 300 * 1024 * 1024), // 300MB
     ]);
   }
@@ -3189,7 +3225,7 @@ export class HealthController {
   @ApiOperation({ summary: "Detailed health check with all indicators" })
   detailed() {
     return this.health.check([
-      () => this.db.pingCheck("database"),
+      () => this.db.isHealthy("database"),
       () => this.memory.checkHeap("memory_heap", 300 * 1024 * 1024),
       () => this.memory.checkRSS("memory_rss", 500 * 1024 * 1024),
       () =>
@@ -3208,23 +3244,58 @@ export class HealthController {
 import { TerminusModule } from "@nestjs/terminus";
 import { HttpModule } from "@nestjs/axios";
 import { HealthController } from "./health.controller";
+import { DrizzleHealthIndicator } from "./custom.indicators";
 
 @Module({
   imports: [TerminusModule, HttpModule],
   controllers: [HealthController],
+  providers: [DrizzleHealthIndicator],
 })
 export class HealthModule {}
 `;
   await writeFile(path.join(healthPath, 'health.module.ts'), healthModuleContent);
 
-  // Custom health indicator example
-  const customIndicatorContent = `import { Injectable } from "@nestjs/common";
+  // Custom health indicators
+  const customIndicatorContent = `import { Inject, Injectable } from "@nestjs/common";
 import {
   HealthIndicator,
   HealthIndicatorResult,
   HealthCheckError,
 } from "@nestjs/terminus";
+import { sql } from "drizzle-orm";
+import { DRIZZLE, DrizzleDb } from "@shared/database/drizzle.provider";
 import Redis from "ioredis";
+
+/**
+ * @nestjs/terminus does not ship a Drizzle-specific health indicator (it
+ * only has one for TypeORM/Mongoose). This follows the same custom
+ * HealthIndicator pattern as the Redis/external-service indicators below:
+ * run a trivial query through the injected DrizzleDb and report up/down
+ * based on success, failure, or timeout.
+ */
+@Injectable()
+export class DrizzleHealthIndicator extends HealthIndicator {
+  constructor(@Inject(DRIZZLE) private readonly db: DrizzleDb) {
+    super();
+  }
+
+  async isHealthy(key: string, timeoutMs = 5000): Promise<HealthIndicatorResult> {
+    try {
+      await Promise.race([
+        this.db.execute(sql\`select 1\`),
+        new Promise((_, reject) =>
+          setTimeout(() => reject(new Error("Database ping timed out")), timeoutMs)
+        ),
+      ]);
+      return this.getStatus(key, true);
+    } catch (error) {
+      throw new HealthCheckError(
+        "Database check failed",
+        this.getStatus(key, false, { error: (error as Error).message })
+      );
+    }
+  }
+}
 
 @Injectable()
 export class RedisHealthIndicator extends HealthIndicator {
@@ -3542,7 +3613,9 @@ export * from "./metrics.service";
   await writeFile(path.join(loggingPath, 'index.ts'), loggingIndexContent);
 
   console.log(chalk.green('  ✓ Health controller (/health, /health/ready, /health/live)'));
-  console.log(chalk.green('  ✓ Custom health indicators (Redis, External Services)'));
+  console.log(
+    chalk.green('  ✓ Custom health indicators (Drizzle/Postgres, Redis, External Services)'),
+  );
   console.log(chalk.green('  ✓ Pino logging with redaction'));
   console.log(chalk.green('  ✓ Request context with AsyncLocalStorage'));
   console.log(chalk.green('  ✓ Metrics service with percentiles'));
@@ -3905,8 +3978,10 @@ export interface PaginatedResult<T> {
 `;
   await writeFile(path.join(filterPath, 'filter.types.ts'), filterTypesContent);
 
-  // TypeORM Query Builder
-  const typeormBuilderContent = `import { SelectQueryBuilder, Brackets } from "typeorm";
+  // Drizzle Query Builder
+  const drizzleBuilderContent = `import { and, or, eq, ne, gt, gte, lt, lte, inArray, notInArray, ilike, isNull, isNotNull, between, asc, desc, sql, SQL } from "drizzle-orm";
+import type { AnyPgColumn, PgTable } from "drizzle-orm/pg-core";
+import { DrizzleDb } from "@shared/database/drizzle.provider";
 import { FilterCondition, QueryOptions, PaginatedResult } from "./filter.types";
 
 /**
@@ -3937,117 +4012,111 @@ export function parseFilters(query: Record<string, any>): FilterCondition[] {
 }
 
 /**
- * Apply filters to TypeORM QueryBuilder
+ * Maps a table's filterable field names to their Drizzle column,
+ * e.g. { id: usersTable.id, email: usersTable.email }.
  */
-export function applyFilters<T>(
-  qb: SelectQueryBuilder<T>,
-  conditions: FilterCondition[],
-  alias: string
-): SelectQueryBuilder<T> {
-  for (const { field, operator, value } of conditions) {
-    const paramKey = \`\${field}_\${Date.now()}_\${Math.random().toString(36).slice(2)}\`;
-    const col = \`\${alias}.\${field}\`;
+export type ColumnMap = Record<string, AnyPgColumn>;
 
-    switch (operator) {
-      case "eq":
-        qb.andWhere(\`\${col} = :\${paramKey}\`, { [paramKey]: value });
-        break;
-      case "ne":
-        qb.andWhere(\`\${col} != :\${paramKey}\`, { [paramKey]: value });
-        break;
-      case "gt":
-        qb.andWhere(\`\${col} > :\${paramKey}\`, { [paramKey]: value });
-        break;
-      case "gte":
-        qb.andWhere(\`\${col} >= :\${paramKey}\`, { [paramKey]: value });
-        break;
-      case "lt":
-        qb.andWhere(\`\${col} < :\${paramKey}\`, { [paramKey]: value });
-        break;
-      case "lte":
-        qb.andWhere(\`\${col} <= :\${paramKey}\`, { [paramKey]: value });
-        break;
-      case "in":
-        qb.andWhere(\`\${col} IN (:...\${paramKey})\`, {
-          [paramKey]: Array.isArray(value) ? value : value.split(",")
-        });
-        break;
-      case "nin":
-        qb.andWhere(\`\${col} NOT IN (:...\${paramKey})\`, {
-          [paramKey]: Array.isArray(value) ? value : value.split(",")
-        });
-        break;
-      case "like":
-        qb.andWhere(\`LOWER(\${col}) LIKE LOWER(:\${paramKey})\`, { [paramKey]: \`%\${value}%\` });
-        break;
-      case "ilike":
-        qb.andWhere(\`\${col} ILIKE :\${paramKey}\`, { [paramKey]: \`%\${value}%\` });
-        break;
-      case "between":
-        const [min, max] = Array.isArray(value) ? value : value.split(",");
-        qb.andWhere(\`\${col} BETWEEN :\${paramKey}_min AND :\${paramKey}_max\`, {
-          [\`\${paramKey}_min\`]: min, [\`\${paramKey}_max\`]: max
-        });
-        break;
-      case "isNull":
-        qb.andWhere(\`\${col} IS NULL\`);
-        break;
-      case "isNotNull":
-        qb.andWhere(\`\${col} IS NOT NULL\`);
-        break;
+function buildCondition(column: AnyPgColumn, operator: FilterCondition["operator"], value: any): SQL | undefined {
+  switch (operator) {
+    case "eq":
+      return eq(column, value);
+    case "ne":
+      return ne(column, value);
+    case "gt":
+      return gt(column, value);
+    case "gte":
+      return gte(column, value);
+    case "lt":
+      return lt(column, value);
+    case "lte":
+      return lte(column, value);
+    case "in":
+      return inArray(column, Array.isArray(value) ? value : String(value).split(","));
+    case "nin":
+      return notInArray(column, Array.isArray(value) ? value : String(value).split(","));
+    case "like":
+    case "ilike":
+      return ilike(column, \`%\${value}%\`);
+    case "between": {
+      const [min, max] = Array.isArray(value) ? value : String(value).split(",");
+      return between(column, min, max);
     }
+    case "isNull":
+      return isNull(column);
+    case "isNotNull":
+      return isNotNull(column);
+    default:
+      return undefined;
   }
-  return qb;
 }
 
 /**
- * Apply search across multiple fields
+ * Apply filters to a Drizzle query, resolving each condition's field name
+ * against the table's column map. Unknown fields are skipped.
  */
-export function applySearch<T>(
-  qb: SelectQueryBuilder<T>,
-  search: string,
-  fields: string[],
-  alias: string
-): SelectQueryBuilder<T> {
-  if (!search || fields.length === 0) return qb;
+export function applyFilters(columns: ColumnMap, conditions: FilterCondition[]): SQL | undefined {
+  const clauses = conditions
+    .map(({ field, operator, value }) => {
+      const column = columns[field];
+      return column ? buildCondition(column, operator, value) : undefined;
+    })
+    .filter((clause): clause is SQL => !!clause);
 
-  qb.andWhere(new Brackets((sub) => {
-    for (const field of fields) {
-      sub.orWhere(\`LOWER(\${alias}.\${field}) LIKE LOWER(:search)\`, { search: \`%\${search}%\` });
-    }
-  }));
-
-  return qb;
+  return clauses.length ? and(...clauses) : undefined;
 }
 
 /**
- * Execute filtered, paginated query
+ * Build an OR predicate that searches (case-insensitively) across
+ * multiple columns.
  */
-export async function executeQuery<T>(
-  qb: SelectQueryBuilder<T>,
+export function applySearch(columns: ColumnMap, search: string, fields: string[]): SQL | undefined {
+  if (!search || fields.length === 0) return undefined;
+
+  const clauses = fields
+    .map((field) => columns[field])
+    .filter((column): column is AnyPgColumn => !!column)
+    .map((column) => ilike(column, \`%\${search}%\`));
+
+  return clauses.length ? or(...clauses) : undefined;
+}
+
+/**
+ * Execute a filtered, paginated query against a Drizzle table.
+ */
+export async function executeQuery<T extends Record<string, unknown>>(
+  db: DrizzleDb,
+  table: PgTable,
+  columns: ColumnMap,
   options: QueryOptions,
-  alias: string,
   defaultSearchFields: string[] = []
 ): Promise<PaginatedResult<T>> {
   const { page = 1, limit = 10, sortBy = "createdAt", sortOrder = "DESC" } = options;
 
-  // Apply filters
-  if (options.filters) {
-    applyFilters(qb, parseFilters(options.filters), alias);
-  }
+  const filterClause = options.filters ? applyFilters(columns, parseFilters(options.filters)) : undefined;
+  const searchClause = options.search
+    ? applySearch(columns, options.search, options.searchFields || defaultSearchFields)
+    : undefined;
 
-  // Apply search
-  if (options.search) {
-    applySearch(qb, options.search, options.searchFields || defaultSearchFields, alias);
-  }
+  const clauses = [filterClause, searchClause].filter((clause): clause is SQL => !!clause);
+  const whereClause = clauses.length ? and(...clauses) : undefined;
 
-  // Get total before pagination
-  const total = await qb.getCount();
+  const sortColumn = columns[sortBy] ?? columns.createdAt;
+  const orderFn = sortOrder === "ASC" ? asc : desc;
 
-  // Apply pagination
-  qb.skip((page - 1) * limit).take(limit).orderBy(\`\${alias}.\${sortBy}\`, sortOrder);
+  let itemsQuery = db.select().from(table as any);
+  if (whereClause) itemsQuery = itemsQuery.where(whereClause) as any;
+  if (sortColumn) itemsQuery = itemsQuery.orderBy(orderFn(sortColumn)) as any;
 
-  const items = await qb.getMany();
+  let countQuery = db.select({ count: sql<number>\`count(*)::int\` }).from(table as any);
+  if (whereClause) countQuery = countQuery.where(whereClause) as any;
+
+  const [items, [countResult]] = await Promise.all([
+    itemsQuery.limit(limit).offset((page - 1) * limit) as unknown as Promise<T[]>,
+    countQuery as unknown as Promise<{ count: number }[]>,
+  ]);
+
+  const total = countResult?.count ?? 0;
   const totalPages = Math.ceil(total / limit);
 
   return {
@@ -4063,7 +4132,7 @@ export async function executeQuery<T>(
   };
 }
 `;
-  await writeFile(path.join(filterPath, 'typeorm-query-builder.ts'), typeormBuilderContent);
+  await writeFile(path.join(filterPath, 'drizzle-query-builder.ts'), drizzleBuilderContent);
 
   // Prisma Query Builder
   const prismaBuilderContent = `import { FilterCondition, QueryOptions, PaginatedResult } from "./filter.types";
@@ -4169,13 +4238,13 @@ export async function executePrismaQuery<T>(
 
   // Index exports
   const indexContent = `export * from "./filter.types";
-export * from "./typeorm-query-builder";
+export * from "./drizzle-query-builder";
 export * from "./prisma-query-builder";
 `;
   await writeFile(path.join(filterPath, 'index.ts'), indexContent);
 
   console.log(chalk.green('  ✓ Filter types and interfaces'));
-  console.log(chalk.green('  ✓ TypeORM query builder utilities'));
+  console.log(chalk.green('  ✓ Drizzle query builder utilities'));
   console.log(chalk.green('  ✓ Prisma query builder utilities'));
 }
 

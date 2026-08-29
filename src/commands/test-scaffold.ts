@@ -17,7 +17,10 @@ interface EntityInfo {
   hasRelations: boolean;
 }
 
-export async function generateTestScaffold(entityName: string, options: TestScaffoldOptions = {}): Promise<void> {
+export async function generateTestScaffold(
+  entityName: string,
+  options: TestScaffoldOptions = {},
+): Promise<void> {
   console.log(chalk.bold.blue(`\n🧪 Generating Test Scaffold for ${entityName}\n`));
 
   const basePath = options.path || process.cwd();
@@ -59,10 +62,13 @@ export async function generateTestScaffold(entityName: string, options: TestScaf
   console.log(chalk.green(`\n✅ Test scaffold generated for ${entityName}`));
 }
 
-async function extractEntityInfo(modulePath: string, entityName: string): Promise<EntityInfo | null> {
+async function extractEntityInfo(
+  modulePath: string,
+  entityName: string,
+): Promise<EntityInfo | null> {
   const entityFiles = findFiles(modulePath, '.entity.ts');
-  const entityFile = entityFiles.find(f =>
-    path.basename(f).toLowerCase().includes(entityName.toLowerCase())
+  const entityFile = entityFiles.find((f) =>
+    path.basename(f).toLowerCase().includes(entityName.toLowerCase()),
   );
 
   if (!entityFile) return null;
@@ -78,10 +84,11 @@ async function extractEntityInfo(modulePath: string, entityName: string): Promis
     fields.push({ name: match[1], type: match[2] });
   }
 
-  const hasRelations = content.includes('@ManyToOne') ||
-                       content.includes('@OneToMany') ||
-                       content.includes('@OneToOne') ||
-                       content.includes('@ManyToMany');
+  const hasRelations =
+    content.includes('@ManyToOne') ||
+    content.includes('@OneToMany') ||
+    content.includes('@OneToOne') ||
+    content.includes('@ManyToMany');
 
   return {
     name: entityName,
@@ -91,7 +98,11 @@ async function extractEntityInfo(modulePath: string, entityName: string): Promis
   };
 }
 
-async function generateFactory(modulePath: string, entityName: string, info: EntityInfo | null): Promise<void> {
+async function generateFactory(
+  modulePath: string,
+  entityName: string,
+  info: EntityInfo | null,
+): Promise<void> {
   const testPath = path.join(modulePath, '__tests__');
   const factoriesPath = path.join(testPath, 'factories');
   await ensureDir(factoriesPath);
@@ -99,10 +110,14 @@ async function generateFactory(modulePath: string, entityName: string, info: Ent
   const pascalName = toPascalCase(entityName);
   const camelName = toCamelCase(entityName);
 
-  const fieldGenerators = info?.fields.map(f => {
-    const generator = getFieldGenerator(f.name, f.type);
-    return `    ${f.name}: ${generator},`;
-  }).join('\n') || `    id: faker.string.uuid(),
+  const fieldGenerators =
+    info?.fields
+      .map((f) => {
+        const generator = getFieldGenerator(f.name, f.type);
+        return `    ${f.name}: ${generator},`;
+      })
+      .join('\n') ||
+    `    id: faker.string.uuid(),
     name: faker.lorem.word(),
     createdAt: faker.date.past(),
     updatedAt: faker.date.recent(),`;
@@ -112,7 +127,7 @@ import { ${pascalName} } from '../../domain/entities/${toKebabCase(entityName)}.
 
 export interface ${pascalName}FactoryOptions {
   id?: string;
-${info?.fields.map(f => `  ${f.name}?: ${mapToTsType(f.type)};`).join('\n') || '  name?: string;'}
+${info?.fields.map((f) => `  ${f.name}?: ${mapToTsType(f.type)};`).join('\n') || '  name?: string;'}
 }
 
 /**
@@ -171,13 +186,20 @@ export class ${pascalName}Builder {
     return this;
   }
 
-${info?.fields.map(f => `  with${toPascalCase(f.name)}(${f.name}: ${mapToTsType(f.type)}): this {
+${
+  info?.fields
+    .map(
+      (f) => `  with${toPascalCase(f.name)}(${f.name}: ${mapToTsType(f.type)}): this {
     this.data.${f.name} = ${f.name};
     return this;
-  }`).join('\n\n') || `  withName(name: string): this {
+  }`,
+    )
+    .join('\n\n') ||
+  `  withName(name: string): this {
     this.data.name = name;
     return this;
-  }`}
+  }`
+}
 
   build(): ${pascalName} {
     return ${pascalName}Factory.create(this.data);
@@ -193,7 +215,11 @@ ${info?.fields.map(f => `  with${toPascalCase(f.name)}(${f.name}: ${mapToTsType(
   console.log(chalk.green(`  ✓ Factory: ${entityName}Factory`));
 }
 
-async function generateUnitTests(modulePath: string, entityName: string, info: EntityInfo | null): Promise<void> {
+async function generateUnitTests(
+  modulePath: string,
+  entityName: string,
+  info: EntityInfo | null,
+): Promise<void> {
   const testPath = path.join(modulePath, '__tests__/unit');
   await ensureDir(testPath);
 
@@ -314,7 +340,10 @@ describe('${pascalName}Service', () => {
 });
 `;
 
-  await writeFile(path.join(testPath, `${toKebabCase(entityName)}.service.spec.ts`), serviceTestContent);
+  await writeFile(
+    path.join(testPath, `${toKebabCase(entityName)}.service.spec.ts`),
+    serviceTestContent,
+  );
   console.log(chalk.green(`  ✓ Unit test: ${entityName}Service`));
 
   // Entity unit test
@@ -349,11 +378,18 @@ describe('${pascalName} Entity', () => {
 });
 `;
 
-  await writeFile(path.join(testPath, `${toKebabCase(entityName)}.entity.spec.ts`), entityTestContent);
+  await writeFile(
+    path.join(testPath, `${toKebabCase(entityName)}.entity.spec.ts`),
+    entityTestContent,
+  );
   console.log(chalk.green(`  ✓ Unit test: ${entityName} Entity`));
 }
 
-async function generateIntegrationTests(modulePath: string, entityName: string, info: EntityInfo | null): Promise<void> {
+async function generateIntegrationTests(
+  modulePath: string,
+  entityName: string,
+  info: EntityInfo | null,
+): Promise<void> {
   const testPath = path.join(modulePath, '__tests__/integration');
   await ensureDir(testPath);
 
@@ -361,34 +397,32 @@ async function generateIntegrationTests(modulePath: string, entityName: string, 
   const camelName = toCamelCase(entityName);
 
   const content = `import { Test, TestingModule } from '@nestjs/testing';
-import { TypeOrmModule } from '@nestjs/typeorm';
+import { DatabaseModule } from '@shared/database/database.module';
+import { DRIZZLE, type DrizzleDb } from '@shared/database/drizzle.provider';
 import { ${pascalName}Service } from '../../application/services/${toKebabCase(entityName)}.service';
 import { ${pascalName}Repository } from '../../infrastructure/repositories/${toKebabCase(entityName)}.repository';
-import { ${pascalName} } from '../../domain/entities/${toKebabCase(entityName)}.entity';
 import { ${pascalName}Factory } from '../factories/${toKebabCase(entityName)}.factory';
 
 describe('${pascalName}Service Integration', () => {
   let module: TestingModule;
   let service: ${pascalName}Service;
   let repository: ${pascalName}Repository;
+  let db: DrizzleDb;
 
   beforeAll(async () => {
+    // Drizzle has no in-memory driver, so this runs against a real (disposable)
+    // Postgres instance — point DATABASE_URL at a test/CI database (e.g. via
+    // docker-compose or a Postgres test container) before running this suite.
+    // DatabaseModule wires up the single global DRIZZLE connection provider,
+    // so there is no forRoot/forFeature equivalent to configure here.
     module = await Test.createTestingModule({
-      imports: [
-        TypeOrmModule.forRoot({
-          type: 'sqlite',
-          database: ':memory:',
-          entities: [${pascalName}],
-          synchronize: true,
-          dropSchema: true,
-        }),
-        TypeOrmModule.forFeature([${pascalName}]),
-      ],
+      imports: [DatabaseModule],
       providers: [${pascalName}Service, ${pascalName}Repository],
     }).compile();
 
     service = module.get<${pascalName}Service>(${pascalName}Service);
     repository = module.get<${pascalName}Repository>(${pascalName}Repository);
+    db = module.get<DrizzleDb>(DRIZZLE);
   });
 
   afterAll(async () => {
@@ -396,8 +430,8 @@ describe('${pascalName}Service Integration', () => {
   });
 
   beforeEach(async () => {
-    // Clean database before each test
-    // await repository.clear();
+    // Clean the table before each test if your suite needs isolation between cases
+    // await db.execute(sql\`TRUNCATE TABLE "table_name" CASCADE\`);
   });
 
   describe('CRUD operations', () => {
@@ -448,7 +482,12 @@ describe('${pascalName}Service Integration', () => {
   console.log(chalk.green(`  ✓ Integration test: ${entityName}Service`));
 }
 
-async function generateE2ETests(basePath: string, moduleName: string, entityName: string, info: EntityInfo | null): Promise<void> {
+async function generateE2ETests(
+  basePath: string,
+  moduleName: string,
+  entityName: string,
+  info: EntityInfo | null,
+): Promise<void> {
   const e2ePath = path.join(basePath, 'test');
   await ensureDir(e2ePath);
 
@@ -568,11 +607,11 @@ describe('${pascalName}Controller (e2e)', () => {
 
 function getFieldGenerator(name: string, type: string): string {
   const generators: Record<string, string> = {
-    'string': 'faker.lorem.word()',
-    'number': 'faker.number.int({ min: 1, max: 1000 })',
-    'boolean': 'faker.datatype.boolean()',
-    'Date': 'faker.date.past()',
-    'text': 'faker.lorem.paragraph()',
+    string: 'faker.lorem.word()',
+    number: 'faker.number.int({ min: 1, max: 1000 })',
+    boolean: 'faker.datatype.boolean()',
+    Date: 'faker.date.past()',
+    text: 'faker.lorem.paragraph()',
   };
 
   // Special cases based on field name
@@ -583,7 +622,8 @@ function getFieldGenerator(name: string, type: string): string {
   if (name.includes('url') || name.includes('Url')) return 'faker.internet.url()';
   if (name.includes('phone')) return 'faker.phone.number()';
   if (name.includes('address')) return 'faker.location.streetAddress()';
-  if (name.includes('price') || name.includes('amount')) return 'faker.number.float({ min: 0, max: 1000, fractionDigits: 2 })';
+  if (name.includes('price') || name.includes('amount'))
+    return 'faker.number.float({ min: 0, max: 1000, fractionDigits: 2 })';
   if (name.includes('description') || name.includes('bio')) return 'faker.lorem.paragraph()';
 
   return generators[type] || 'faker.lorem.word()';
@@ -591,11 +631,11 @@ function getFieldGenerator(name: string, type: string): string {
 
 function mapToTsType(type: string): string {
   const map: Record<string, string> = {
-    'string': 'string',
-    'number': 'number',
-    'boolean': 'boolean',
-    'Date': 'Date',
-    'text': 'string',
+    string: 'string',
+    number: 'number',
+    boolean: 'boolean',
+    Date: 'Date',
+    text: 'string',
   };
   return map[type] || 'any';
 }
@@ -616,7 +656,10 @@ function findFiles(dir: string, extension: string): string[] {
 }
 
 function toPascalCase(str: string): string {
-  return str.split(/[-_\s]+/).map(w => w.charAt(0).toUpperCase() + w.slice(1)).join('');
+  return str
+    .split(/[-_\s]+/)
+    .map((w) => w.charAt(0).toUpperCase() + w.slice(1))
+    .join('');
 }
 
 function toCamelCase(str: string): string {
@@ -625,5 +668,8 @@ function toCamelCase(str: string): string {
 }
 
 function toKebabCase(str: string): string {
-  return str.replace(/([a-z])([A-Z])/g, '$1-$2').replace(/[\s_]+/g, '-').toLowerCase();
+  return str
+    .replace(/([a-z])([A-Z])/g, '$1-$2')
+    .replace(/[\s_]+/g, '-')
+    .toLowerCase();
 }

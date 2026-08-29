@@ -10,12 +10,15 @@ export interface MultiDatabaseOptions {
 
 interface DatabaseConfig {
   name: string;
-  type: 'postgres' | 'mysql' | 'mongodb' | 'sqlite';
+  type: 'postgres';
   connectionName: string;
   entities: string[];
 }
 
-export async function setupMultiDatabase(basePath: string, options: MultiDatabaseOptions = {}): Promise<void> {
+export async function setupMultiDatabase(
+  basePath: string,
+  options: MultiDatabaseOptions = {},
+): Promise<void> {
   console.log(chalk.bold.blue('\n🗄️  Setting up Multi-Database Support\n'));
 
   const sharedPath = path.join(basePath, 'src/shared');
@@ -26,18 +29,22 @@ export async function setupMultiDatabase(basePath: string, options: MultiDatabas
   await ensureDir(path.join(dbPath, 'repositories'));
 
   // Database configuration types
-  const typesContent = `export interface DatabaseConnectionConfig {
+  const typesContent = `/**
+ * Drizzle multi-database support targets Postgres connections only, each
+ * backed by its own \`postgres\`-js client wrapped in \`drizzle()\`.
+ */
+export interface DatabaseConnectionConfig {
   name: string;
-  type: 'postgres' | 'mysql' | 'mongodb' | 'sqlite';
+  type: 'postgres';
   host?: string;
   port?: number;
   username?: string;
   password?: string;
   database?: string;
   url?: string;
-  synchronize?: boolean;
+  ssl?: boolean;
+  maxConnections?: number;
   logging?: boolean;
-  entities?: string[];
 }
 
 export interface MultiDatabaseConfig {
@@ -59,17 +66,27 @@ export interface DatabaseHealthStatus {
 
   // Connection manager
   const connectionManagerContent = `import { Injectable, Logger, OnModuleInit, OnModuleDestroy } from '@nestjs/common';
-import { DataSource, DataSourceOptions } from 'typeorm';
-import { DatabaseConnectionConfig, DatabaseHealthStatus } from './database.types';
+import { drizzle, type PostgresJsDatabase } from 'drizzle-orm/postgres-js';
+import { sql } from 'drizzle-orm';
+import postgres, { type Sql } from 'postgres';
+import { DatabaseConnectionConfig, DatabaseHealthStatus } from '../database.types';
+
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+export type ConnectionDb = PostgresJsDatabase<Record<string, any>>;
+
+interface ManagedConnection {
+  client: Sql;
+  db: ConnectionDb;
+}
 
 @Injectable()
 export class ConnectionManager implements OnModuleInit, OnModuleDestroy {
   private readonly logger = new Logger(ConnectionManager.name);
-  private connections: Map<string, DataSource> = new Map();
+  private connections: Map<string, ManagedConnection> = new Map();
   private defaultConnection: string = 'default';
 
   async onModuleInit() {
-    // Connections are lazy-loaded
+    // Connections are lazy-loaded via registerConnection()
     this.logger.log('ConnectionManager initialized');
   }
 
@@ -78,35 +95,32 @@ export class ConnectionManager implements OnModuleInit, OnModuleDestroy {
   }
 
   /**
-   * Get or create a connection
+   * Get an already-registered connection's Drizzle client
    */
-  async getConnection(name: string = 'default'): Promise<DataSource> {
-    if (this.connections.has(name)) {
-      const conn = this.connections.get(name)!;
-      if (conn.isInitialized) {
-        return conn;
-      }
+  async getConnection(name: string = 'default'): Promise<ConnectionDb> {
+    const conn = this.connections.get(name);
+    if (conn) {
+      return conn.db;
     }
 
     throw new Error(\`Connection "\${name}" not found. Register it first.\`);
   }
 
   /**
-   * Register a new connection
+   * Register a new Postgres connection (a \`postgres\`-js client wrapped by \`drizzle()\`)
    */
-  async registerConnection(config: DatabaseConnectionConfig): Promise<DataSource> {
-    if (this.connections.has(config.name)) {
-      return this.connections.get(config.name)!;
+  async registerConnection(config: DatabaseConnectionConfig): Promise<ConnectionDb> {
+    const existing = this.connections.get(config.name);
+    if (existing) {
+      return existing.db;
     }
 
-    const options = this.buildDataSourceOptions(config);
-    const dataSource = new DataSource(options);
+    const client = this.buildClient(config);
+    const db: ConnectionDb = drizzle(client);
+    this.connections.set(config.name, { client, db });
 
-    await dataSource.initialize();
-    this.connections.set(config.name, dataSource);
-
-    this.logger.log(\`Connected to database: \${config.name} (\${config.type})\`);
-    return dataSource;
+    this.logger.log(\`Connected to database: \${config.name} (postgres)\`);
+    return db;
   }
 
   /**
@@ -114,8 +128,8 @@ export class ConnectionManager implements OnModuleInit, OnModuleDestroy {
    */
   async closeConnection(name: string): Promise<void> {
     const conn = this.connections.get(name);
-    if (conn?.isInitialized) {
-      await conn.destroy();
+    if (conn) {
+      await conn.client.end();
       this.connections.delete(name);
       this.logger.log(\`Closed connection: \${name}\`);
     }
@@ -126,10 +140,8 @@ export class ConnectionManager implements OnModuleInit, OnModuleDestroy {
    */
   async closeAll(): Promise<void> {
     for (const [name, conn] of this.connections) {
-      if (conn.isInitialized) {
-        await conn.destroy();
-        this.logger.log(\`Closed connection: \${name}\`);
-      }
+      await conn.client.end();
+      this.logger.log(\`Closed connection: \${name}\`);
     }
     this.connections.clear();
   }
@@ -145,7 +157,7 @@ export class ConnectionManager implements OnModuleInit, OnModuleDestroy {
 
       try {
         const start = Date.now();
-        await conn.query('SELECT 1');
+        await conn.db.execute(sql\`select 1\`);
         status.connected = true;
         status.latency = Date.now() - start;
       } catch (error) {
@@ -175,58 +187,16 @@ export class ConnectionManager implements OnModuleInit, OnModuleDestroy {
     this.defaultConnection = name;
   }
 
-  private buildDataSourceOptions(config: DatabaseConnectionConfig): DataSourceOptions {
-    const base: Partial<DataSourceOptions> = {
-      synchronize: config.synchronize ?? false,
-      logging: config.logging ?? false,
-    };
+  private buildClient(config: DatabaseConnectionConfig): Sql {
+    const connectionString =
+      config.url ||
+      \`postgres://\${config.username}:\${config.password}@\${config.host || 'localhost'}:\${config.port || 5432}/\${config.database}\`;
 
-    switch (config.type) {
-      case 'postgres':
-        return {
-          ...base,
-          type: 'postgres',
-          host: config.host || 'localhost',
-          port: config.port || 5432,
-          username: config.username,
-          password: config.password,
-          database: config.database,
-          entities: config.entities || [],
-        } as DataSourceOptions;
-
-      case 'mysql':
-        return {
-          ...base,
-          type: 'mysql',
-          host: config.host || 'localhost',
-          port: config.port || 3306,
-          username: config.username,
-          password: config.password,
-          database: config.database,
-          entities: config.entities || [],
-        } as DataSourceOptions;
-
-      case 'mongodb':
-        return {
-          ...base,
-          type: 'mongodb',
-          url: config.url || \`mongodb://\${config.host}:\${config.port}/\${config.database}\`,
-          useNewUrlParser: true,
-          useUnifiedTopology: true,
-          entities: config.entities || [],
-        } as DataSourceOptions;
-
-      case 'sqlite':
-        return {
-          ...base,
-          type: 'sqlite',
-          database: config.database || ':memory:',
-          entities: config.entities || [],
-        } as DataSourceOptions;
-
-      default:
-        throw new Error(\`Unsupported database type: \${config.type}\`);
-    }
+    return postgres(connectionString, {
+      max: config.maxConnections ?? 10,
+      ssl: config.ssl ?? false,
+      debug: config.logging ?? false,
+    });
   }
 }
 `;
@@ -234,39 +204,35 @@ export class ConnectionManager implements OnModuleInit, OnModuleDestroy {
   console.log(chalk.green('  ✓ Connection manager'));
 
   // Multi-database repository base
-  const multiRepoContent = `import { DataSource, Repository, EntityTarget, ObjectLiteral } from 'typeorm';
-import { ConnectionManager } from '../connections/connection-manager';
+  const multiRepoContent = `import { eq } from 'drizzle-orm';
+import type { InferInsertModel, InferSelectModel } from 'drizzle-orm';
+import type { PgTable } from 'drizzle-orm/pg-core';
+import { ConnectionManager, type ConnectionDb } from '../connections/connection-manager';
 
 /**
- * Base repository that can work with multiple database connections
+ * Base repository that can work with multiple named Postgres connections.
+ * \`table\` must be a Drizzle \`pgTable(...)\` definition with an \`id\` column
+ * (see \`infrastructure/orm-entities/*.orm-entity.ts\` for the schema shape).
  */
-export abstract class MultiDatabaseRepository<T extends ObjectLiteral> {
+export abstract class MultiDatabaseRepository<TTable extends PgTable & { id: any }> {
   protected connectionManager: ConnectionManager;
+  protected table: TTable;
   protected connectionName: string;
-  protected entity: EntityTarget<T>;
 
   constructor(
     connectionManager: ConnectionManager,
-    entity: EntityTarget<T>,
+    table: TTable,
     connectionName: string = 'default'
   ) {
     this.connectionManager = connectionManager;
-    this.entity = entity;
+    this.table = table;
     this.connectionName = connectionName;
   }
 
   /**
-   * Get TypeORM repository for the entity
+   * Get the Drizzle client for the current connection
    */
-  protected async getRepository(): Promise<Repository<T>> {
-    const connection = await this.connectionManager.getConnection(this.connectionName);
-    return connection.getRepository(this.entity);
-  }
-
-  /**
-   * Get raw data source
-   */
-  protected async getDataSource(): Promise<DataSource> {
+  protected async getDb(): Promise<ConnectionDb> {
     return this.connectionManager.getConnection(this.connectionName);
   }
 
@@ -279,42 +245,54 @@ export abstract class MultiDatabaseRepository<T extends ObjectLiteral> {
   }
 
   /**
-   * Execute within a transaction
+   * Execute within a transaction on the current connection
    */
-  async withTransaction<R>(work: (repo: Repository<T>) => Promise<R>): Promise<R> {
-    const dataSource = await this.getDataSource();
-    return dataSource.transaction(async (manager) => {
-      const repo = manager.getRepository(this.entity);
-      return work(repo);
-    });
+  async withTransaction<R>(work: (tx: ConnectionDb) => Promise<R>): Promise<R> {
+    const db = await this.getDb();
+    return db.transaction((tx) => work(tx as unknown as ConnectionDb));
   }
 
   // Standard CRUD operations
-  async findAll(): Promise<T[]> {
-    const repo = await this.getRepository();
-    return repo.find();
+  async findAll(): Promise<InferSelectModel<TTable>[]> {
+    const db = await this.getDb();
+    const rows = await db.select().from(this.table as any);
+    return rows as InferSelectModel<TTable>[];
   }
 
-  async findById(id: string | number): Promise<T | null> {
-    const repo = await this.getRepository();
-    return repo.findOne({ where: { id } as any });
+  async findById(id: string | number): Promise<InferSelectModel<TTable> | null> {
+    const db = await this.getDb();
+    const [row] = await db
+      .select()
+      .from(this.table as any)
+      .where(eq((this.table as any).id, id));
+    return (row as InferSelectModel<TTable>) ?? null;
   }
 
-  async create(data: Partial<T>): Promise<T> {
-    const repo = await this.getRepository();
-    const entity = repo.create(data as any);
-    return repo.save(entity);
+  async create(data: InferInsertModel<TTable>): Promise<InferSelectModel<TTable>> {
+    const db = await this.getDb();
+    const [row] = await db
+      .insert(this.table as any)
+      .values(data as any)
+      .returning();
+    return row as InferSelectModel<TTable>;
   }
 
-  async update(id: string | number, data: Partial<T>): Promise<T | null> {
-    const repo = await this.getRepository();
-    await repo.update(id, data as any);
-    return this.findById(id);
+  async update(
+    id: string | number,
+    data: Partial<InferInsertModel<TTable>>,
+  ): Promise<InferSelectModel<TTable> | null> {
+    const db = await this.getDb();
+    const [row] = await db
+      .update(this.table as any)
+      .set(data as any)
+      .where(eq((this.table as any).id, id))
+      .returning();
+    return (row as InferSelectModel<TTable>) ?? null;
   }
 
   async delete(id: string | number): Promise<void> {
-    const repo = await this.getRepository();
-    await repo.delete(id);
+    const db = await this.getDb();
+    await db.delete(this.table as any).where(eq((this.table as any).id, id));
   }
 }
 `;
@@ -395,30 +373,41 @@ export class MultiDatabaseModule {
   console.log(chalk.green('  ✓ Multi-database module'));
 
   // Index exports
-  await writeFile(path.join(dbPath, 'index.ts'), `export * from './database.types';
+  await writeFile(
+    path.join(dbPath, 'index.ts'),
+    `export * from './database.types';
 export * from './connections/connection-manager';
 export * from './repositories/multi-database.repository';
 export * from './decorators';
 export * from './multi-database.module';
-`);
+`,
+  );
 
-  await writeFile(path.join(dbPath, 'connections/index.ts'), `export * from './connection-manager';
-`);
+  await writeFile(
+    path.join(dbPath, 'connections/index.ts'),
+    `export * from './connection-manager';
+`,
+  );
 
-  await writeFile(path.join(dbPath, 'repositories/index.ts'), `export * from './multi-database.repository';
-`);
+  await writeFile(
+    path.join(dbPath, 'repositories/index.ts'),
+    `export * from './multi-database.repository';
+`,
+  );
 
   console.log(chalk.green('\n✅ Multi-database support configured!'));
   console.log(chalk.gray('\nUsage example:'));
-  console.log(chalk.cyan(`
+  console.log(
+    chalk.cyan(`
   // In app.module.ts
   MultiDatabaseModule.forRoot({
     default: 'primary',
     connections: {
-      primary: { type: 'postgres', host: 'localhost', ... },
-      analytics: { type: 'mysql', host: 'analytics-db', ... },
-      cache: { type: 'mongodb', url: 'mongodb://...', ... },
+      primary: { type: 'postgres', host: 'localhost', database: 'app', ... },
+      analytics: { type: 'postgres', host: 'analytics-db', database: 'analytics', ... },
+      reporting: { type: 'postgres', url: 'postgres://...', ... },
     },
   })
-  `));
+  `),
+  );
 }

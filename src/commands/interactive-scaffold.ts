@@ -70,7 +70,7 @@ export async function interactiveScaffold(options: InteractiveOptions) {
   const existingModules = await getExistingModules(basePath);
   const moduleChoices = [
     { name: `Create new module: ${toKebabCase(entityName)}`, value: '__new__' },
-    ...existingModules.map(m => ({ name: `Use existing: ${m}`, value: m })),
+    ...existingModules.map((m) => ({ name: `Use existing: ${m}`, value: m })),
   ];
 
   const { moduleChoice } = await inquirer.prompt([
@@ -108,10 +108,10 @@ export async function interactiveScaffold(options: InteractiveOptions) {
       name: 'orm',
       message: 'Which ORM do you want to use?',
       choices: [
-        { name: 'TypeORM - Traditional ORM with decorators', value: 'typeorm' },
+        { name: 'Drizzle - Lightweight type-safe SQL ORM', value: 'drizzle' },
         { name: 'Prisma - Modern type-safe database client', value: 'prisma' },
       ],
-      default: 'typeorm',
+      default: 'drizzle',
     },
   ]);
 
@@ -193,7 +193,11 @@ export async function interactiveScaffold(options: InteractiveOptions) {
       modifiers,
     });
 
-    console.log(chalk.green(`  ✓ Added field: ${fieldName}: ${fieldType}${modifiers.length > 0 ? ' [' + modifiers.join(', ') + ']' : ''}`));
+    console.log(
+      chalk.green(
+        `  ✓ Added field: ${fieldName}: ${fieldType}${modifiers.length > 0 ? ' [' + modifiers.join(', ') + ']' : ''}`,
+      ),
+    );
   }
 
   // Step 5: Additional options
@@ -216,9 +220,13 @@ export async function interactiveScaffold(options: InteractiveOptions) {
   console.log(chalk.cyan('\n📋 Summary\n'));
   console.log(`  ${chalk.white('Entity:')} ${toPascalCase(entityName)}`);
   console.log(`  ${chalk.white('Module:')} ${toKebabCase(moduleName)}`);
-  console.log(`  ${chalk.white('ORM:')} ${orm === 'prisma' ? 'Prisma' : 'TypeORM'}`);
-  console.log(`  ${chalk.white('Fields:')} ${fields.length > 0 ? fields.map(f => f.name).join(', ') : '(none)'}`);
-  console.log(`  ${chalk.white('Options:')} ${additionalOptions.length > 0 ? additionalOptions.join(', ') : '(none)'}`);
+  console.log(`  ${chalk.white('ORM:')} ${orm === 'prisma' ? 'Prisma' : 'Drizzle'}`);
+  console.log(
+    `  ${chalk.white('Fields:')} ${fields.length > 0 ? fields.map((f) => f.name).join(', ') : '(none)'}`,
+  );
+  console.log(
+    `  ${chalk.white('Options:')} ${additionalOptions.length > 0 ? additionalOptions.join(', ') : '(none)'}`,
+  );
 
   const { confirm } = await inquirer.prompt([
     {
@@ -236,7 +244,7 @@ export async function interactiveScaffold(options: InteractiveOptions) {
 
   // Build fields string
   const fieldsString = fields
-    .map(f => {
+    .map((f) => {
       let fieldStr = `${f.name}:${f.type}`;
       if (f.modifiers.length > 0) {
         fieldStr += ':' + f.modifiers.join(':');
@@ -268,7 +276,5 @@ async function getExistingModules(basePath: string): Promise<string[]> {
   }
 
   const entries = await fs.readdir(modulesPath, { withFileTypes: true });
-  return entries
-    .filter(entry => entry.isDirectory())
-    .map(entry => entry.name);
+  return entries.filter((entry) => entry.isDirectory()).map((entry) => entry.name);
 }

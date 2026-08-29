@@ -1,4 +1,6 @@
-import { SelectQueryBuilder, Brackets } from "typeorm";
+import { and, or, asc, desc, eq, ne, gt, gte, lt, lte, inArray, notInArray, ilike, isNull, isNotNull, count, type SQL } from "drizzle-orm";
+import type { AnyPgColumn, PgTable } from "drizzle-orm/pg-core";
+import { DrizzleDb } from "@shared/database/drizzle.provider";
 
 export type FilterOperator =
   | "eq"
@@ -30,6 +32,12 @@ export interface QueryOptions {
   searchFields?: string[];
   filters?: Record<string, any>;
 }
+
+/**
+ * Map of filterable field name -> Drizzle column, e.g.
+ * { id: usersTable.id, email: usersTable.email }
+ */
+export type FilterColumnMap = Record<string, AnyPgColumn>;
 
 /**
  * Parse filter parameters from query string
@@ -74,145 +82,146 @@ export function parseFilters(query: Record<string, any>): FilterCondition[] {
 }
 
 /**
- * Apply filters to TypeORM QueryBuilder
+ * Build a drizzle-orm WHERE condition from a list of filter conditions.
+ * `columns` maps each filterable field name to its Drizzle column — fields
+ * that aren't in the map are ignored (nothing is applied).
  */
-export function applyFiltersToQueryBuilder<T>(
-  queryBuilder: SelectQueryBuilder<T>,
+export function buildFilterConditions(
   conditions: FilterCondition[],
-  alias: string
-): SelectQueryBuilder<T> {
+  columns: FilterColumnMap
+): SQL | undefined {
+  const clauses: SQL[] = [];
+
   for (const condition of conditions) {
-    const { field, operator, value } = condition;
-    const paramKey = `${field}_${operator}_${Date.now()}`;
-    const columnPath = `${alias}.${field}`;
+    const column = columns[condition.field];
+    if (!column) continue;
+
+    const { operator, value } = condition;
 
     switch (operator) {
       case "eq":
-        queryBuilder.andWhere(`${columnPath} = :${paramKey}`, { [paramKey]: value });
+        clauses.push(eq(column, value));
         break;
       case "ne":
-        queryBuilder.andWhere(`${columnPath} != :${paramKey}`, { [paramKey]: value });
+        clauses.push(ne(column, value));
         break;
       case "gt":
-        queryBuilder.andWhere(`${columnPath} > :${paramKey}`, { [paramKey]: value });
+        clauses.push(gt(column, value));
         break;
       case "gte":
-        queryBuilder.andWhere(`${columnPath} >= :${paramKey}`, { [paramKey]: value });
+        clauses.push(gte(column, value));
         break;
       case "lt":
-        queryBuilder.andWhere(`${columnPath} < :${paramKey}`, { [paramKey]: value });
+        clauses.push(lt(column, value));
         break;
       case "lte":
-        queryBuilder.andWhere(`${columnPath} <= :${paramKey}`, { [paramKey]: value });
+        clauses.push(lte(column, value));
         break;
-      case "in":
-        const inValues = Array.isArray(value) ? value : value.split(",");
-        queryBuilder.andWhere(`${columnPath} IN (:...${paramKey})`, { [paramKey]: inValues });
+      case "in": {
+        const inValues = Array.isArray(value) ? value : String(value).split(",");
+        clauses.push(inArray(column, inValues));
         break;
-      case "nin":
-        const ninValues = Array.isArray(value) ? value : value.split(",");
-        queryBuilder.andWhere(`${columnPath} NOT IN (:...${paramKey})`, { [paramKey]: ninValues });
+      }
+      case "nin": {
+        const ninValues = Array.isArray(value) ? value : String(value).split(",");
+        clauses.push(notInArray(column, ninValues));
         break;
+      }
       case "like":
-        queryBuilder.andWhere(`LOWER(${columnPath}) LIKE LOWER(:${paramKey})`, {
-          [paramKey]: `%${value}%`,
-        });
+        clauses.push(ilike(column, `%${value}%`));
         break;
       case "ilike":
-        queryBuilder.andWhere(`${columnPath} ILIKE :${paramKey}`, {
-          [paramKey]: `%${value}%`,
-        });
+        clauses.push(ilike(column, `%${value}%`));
         break;
-      case "between":
-        const [min, max] = Array.isArray(value) ? value : value.split(",");
-        queryBuilder.andWhere(`${columnPath} BETWEEN :${paramKey}_min AND :${paramKey}_max`, {
-          [`${paramKey}_min`]: min,
-          [`${paramKey}_max`]: max,
-        });
+      case "between": {
+        const [min, max] = Array.isArray(value) ? value : String(value).split(",");
+        clauses.push(and(gte(column, min), lte(column, max))!);
         break;
+      }
       case "isNull":
-        queryBuilder.andWhere(`${columnPath} IS NULL`);
+        clauses.push(isNull(column));
         break;
       case "isNotNull":
-        queryBuilder.andWhere(`${columnPath} IS NOT NULL`);
+        clauses.push(isNotNull(column));
         break;
     }
   }
 
-  return queryBuilder;
+  return clauses.length > 0 ? and(...clauses) : undefined;
 }
 
 /**
- * Apply search across multiple fields
+ * Build an OR condition matching `search` against any of `searchFields`
+ * (case-insensitive substring match).
  */
-export function applySearchToQueryBuilder<T>(
-  queryBuilder: SelectQueryBuilder<T>,
+export function buildSearchCondition(
   search: string,
   searchFields: string[],
-  alias: string
-): SelectQueryBuilder<T> {
-  if (!search || searchFields.length === 0) return queryBuilder;
+  columns: FilterColumnMap
+): SQL | undefined {
+  if (!search || searchFields.length === 0) return undefined;
 
-  queryBuilder.andWhere(
-    new Brackets((qb) => {
-      for (const field of searchFields) {
-        qb.orWhere(`LOWER(${alias}.${field}) LIKE LOWER(:search)`, {
-          search: `%${search}%`,
-        });
-      }
-    })
-  );
+  const clauses = searchFields
+    .map((field) => columns[field])
+    .filter((column): column is AnyPgColumn => Boolean(column))
+    .map((column) => ilike(column, `%${search}%`));
 
-  return queryBuilder;
+  return clauses.length > 0 ? or(...clauses) : undefined;
 }
 
 /**
- * Apply pagination and sorting to QueryBuilder
+ * Resolve the ORDER BY clause for a query, falling back to `defaultSortBy`
+ * (or the first available column) when `options.sortBy` isn't filterable.
  */
-export function applyPaginationToQueryBuilder<T>(
-  queryBuilder: SelectQueryBuilder<T>,
+export function buildOrderBy(
   options: QueryOptions,
-  alias: string
-): SelectQueryBuilder<T> {
-  const { page = 1, limit = 10, sortBy = "createdAt", sortOrder = "DESC" } = options;
+  columns: FilterColumnMap,
+  defaultSortBy = "createdAt"
+): SQL | undefined {
+  const { sortBy = defaultSortBy, sortOrder = "DESC" } = options;
+  const column = columns[sortBy] ?? columns[defaultSortBy];
+  if (!column) return undefined;
 
-  queryBuilder
-    .skip((page - 1) * limit)
-    .take(limit)
-    .orderBy(`${alias}.${sortBy}`, sortOrder);
-
-  return queryBuilder;
+  return sortOrder === "ASC" ? asc(column) : desc(column);
 }
 
 /**
- * Build complete query with filters, search, and pagination
+ * Build complete query with filters, search, and pagination, and execute it
+ * against a Drizzle table.
  */
-export async function executeFilteredQuery<T>(
-  queryBuilder: SelectQueryBuilder<T>,
+export async function executeFilteredQuery<TRow extends Record<string, unknown>>(
+  db: DrizzleDb,
+  table: PgTable,
+  columns: FilterColumnMap,
   options: QueryOptions,
-  alias: string,
   defaultSearchFields: string[] = []
-): Promise<[T[], number]> {
-  // Parse and apply filters
-  if (options.filters) {
-    const conditions = parseFilters(options.filters);
-    applyFiltersToQueryBuilder(queryBuilder, conditions, alias);
-  }
+): Promise<[TRow[], number]> {
+  const { page = 1, limit = 10 } = options;
 
-  // Apply search
-  if (options.search) {
-    const searchFields = options.searchFields || defaultSearchFields;
-    applySearchToQueryBuilder(queryBuilder, options.search, searchFields, alias);
-  }
+  const conditions = options.filters ? parseFilters(options.filters) : [];
+  const filterWhere = buildFilterConditions(conditions, columns);
 
-  // Get total count before pagination
-  const total = await queryBuilder.getCount();
+  const searchFields = options.searchFields || defaultSearchFields;
+  const searchWhere = options.search
+    ? buildSearchCondition(options.search, searchFields, columns)
+    : undefined;
 
-  // Apply pagination and sorting
-  applyPaginationToQueryBuilder(queryBuilder, options, alias);
+  const where =
+    filterWhere && searchWhere
+      ? and(filterWhere, searchWhere)
+      : (filterWhere ?? searchWhere);
 
-  // Execute query
-  const items = await queryBuilder.getMany();
+  const orderBy = buildOrderBy(options, columns);
 
-  return [items, total];
+  const rowsQuery = db.select().from(table);
+  const filteredRows = where ? rowsQuery.where(where) : rowsQuery;
+  const orderedRows = orderBy ? filteredRows.orderBy(orderBy) : filteredRows;
+  const pagedRows = orderedRows.limit(limit).offset((page - 1) * limit);
+
+  const countQuery = db.select({ value: count() }).from(table);
+  const filteredCount = where ? countQuery.where(where) : countQuery;
+
+  const [items, [countResult]] = await Promise.all([pagedRows, filteredCount]);
+
+  return [items as unknown as TRow[], countResult?.value ?? 0];
 }

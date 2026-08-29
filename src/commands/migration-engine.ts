@@ -1,11 +1,11 @@
 import * as fs from 'fs';
 import * as path from 'path';
 import chalk from 'chalk';
-import { ensureDir, writeFile } from '../utils/file.utils';
+import { ensureDir, writeFile, writeGeneratedFile } from '../utils/file.utils';
 
 export interface MigrationEngineOptions {
   path?: string;
-  orm?: 'typeorm' | 'prisma';
+  orm?: 'drizzle' | 'prisma';
   dryRun?: boolean;
 }
 
@@ -56,7 +56,17 @@ interface SchemaDiff {
   };
 }
 
-export async function diffMigration(basePath: string, options: MigrationEngineOptions = {}): Promise<void> {
+export async function diffMigration(
+  basePath: string,
+  options: MigrationEngineOptions = {},
+): Promise<void> {
+  const orm = options.orm || 'drizzle';
+
+  if (orm !== 'prisma') {
+    await guideDrizzleSchemaDiff(basePath, options.dryRun);
+    return;
+  }
+
   console.log(chalk.bold.blue('\n🔄 Migration Diff Engine\n'));
 
   const modulesPath = path.join(basePath, 'src/modules');
@@ -79,7 +89,9 @@ export async function diffMigration(basePath: string, options: MigrationEngineOp
     previousSchemas = JSON.parse(fs.readFileSync(snapshotPath, 'utf-8'));
     console.log(chalk.gray(`Previous snapshot: ${previousSchemas.length} entities`));
   } else {
-    console.log(chalk.yellow('No previous schema snapshot found. Will generate initial migration.'));
+    console.log(
+      chalk.yellow('No previous schema snapshot found. Will generate initial migration.'),
+    );
   }
 
   // Calculate diff
@@ -102,16 +114,64 @@ export async function diffMigration(basePath: string, options: MigrationEngineOp
   const timestamp = Date.now();
   const migrationName = generateMigrationName(diff);
 
-  if (options.orm === 'prisma') {
-    await generatePrismaMigrationFromDiff(basePath, diff, migrationName, timestamp);
-  } else {
-    await generateTypeOrmMigrationFromDiff(basePath, diff, migrationName, timestamp);
-  }
+  await generatePrismaMigrationFromDiff(basePath, diff, migrationName, timestamp);
 
   // Save new snapshot
   await ensureDir(path.join(basePath, '.ddd'));
   await writeFile(snapshotPath, JSON.stringify(currentSchemas, null, 2));
   console.log(chalk.gray('\n📸 Schema snapshot updated.'));
+}
+
+/**
+ * Drizzle doesn't use hand-written TypeScript migration classes, and it
+ * doesn't diff entity files against a JSON snapshot either — its real
+ * workflow is `npx drizzle-kit generate`, which diffs your *.orm-entity.ts
+ * `pgTable(...)` schema files against the live database (described via
+ * drizzle.config.ts) and emits real SQL migrations under ./drizzle. A static
+ * generator can't safely fabricate that SQL without a DB connection, so for
+ * Drizzle this command just points the user at the real workflow instead of
+ * running the TypeORM-decorator-based diff engine below (which parses
+ * `@Entity`/`@Column` classes that don't exist in a Drizzle project).
+ */
+async function guideDrizzleSchemaDiff(basePath: string, dryRun = false): Promise<void> {
+  console.log(chalk.bold.blue('\n🔄 Drizzle schema diffing\n'));
+  console.log(
+    chalk.white('  Drizzle migrations come from diffing your *.orm-entity.ts schema files against'),
+  );
+  console.log(
+    chalk.white('  the live database with drizzle-kit — not from this command, which diffs'),
+  );
+  console.log(chalk.white('  TypeORM-style entity classes against a JSON snapshot.\n'));
+  console.log(chalk.white('  To generate a migration from your schema changes, run:'));
+  console.log(chalk.cyan('    npx drizzle-kit generate'));
+  console.log(chalk.white('  Then apply it with:'));
+  console.log(chalk.cyan('    npx drizzle-kit migrate\n'));
+
+  await ensureDrizzleConfig(basePath, dryRun);
+}
+
+/**
+ * Make sure drizzle-kit has a config to work with. Mirrors the minimal config
+ * generateDrizzleService() writes in generate-all.ts during `slade init`/`scaffold`.
+ */
+async function ensureDrizzleConfig(basePath: string, dryRun = false): Promise<void> {
+  const drizzleConfigPath = path.join(basePath, 'drizzle.config.ts');
+  if (fs.existsSync(drizzleConfigPath)) return;
+
+  const content = `import { defineConfig } from "drizzle-kit";
+
+export default defineConfig({
+  schema: "./src/modules/**/infrastructure/orm-entities/*.orm-entity.ts",
+  out: "./drizzle",
+  dialect: "postgresql",
+  dbCredentials: {
+    url: process.env.DATABASE_URL!,
+  },
+});
+`;
+
+  await writeGeneratedFile(drizzleConfigPath, content, dryRun);
+  console.log(chalk.green(`✓ ${dryRun ? 'Would create' : 'Created'} drizzle.config.ts`));
 }
 
 function parseEntitySchemas(modulesPath: string): EntitySchema[] {
@@ -144,7 +204,8 @@ function parseEntityFile(filePath: string): EntitySchema | null {
   const relations: RelationSchema[] = [];
 
   // Parse columns
-  const columnRegex = /@(?:Column|PrimaryGeneratedColumn|PrimaryColumn|CreateDateColumn|UpdateDateColumn|DeleteDateColumn)\s*\(([^)]*)\)\s*(\w+)(?:\?)?:\s*(\w+)/g;
+  const columnRegex =
+    /@(?:Column|PrimaryGeneratedColumn|PrimaryColumn|CreateDateColumn|UpdateDateColumn|DeleteDateColumn)\s*\(([^)]*)\)\s*(\w+)(?:\?)?:\s*(\w+)/g;
 
   let match;
   while ((match = columnRegex.exec(content)) !== null) {
@@ -169,7 +230,7 @@ function parseEntityFile(filePath: string): EntitySchema | null {
     const indexContent = match[0];
     const colsMatch = indexContent.match(/\[([^\]]+)\]/);
     if (colsMatch) {
-      const cols = colsMatch[1].match(/['"](\w+)['"]/g)?.map(c => c.replace(/['"]/g, '')) || [];
+      const cols = colsMatch[1].match(/['"](\w+)['"]/g)?.map((c) => c.replace(/['"]/g, '')) || [];
       indexes.push({
         name: `IDX_${tableName}_${cols.join('_')}`,
         columns: cols,
@@ -201,8 +262,8 @@ function calculateDiff(previous: EntitySchema[], current: EntitySchema[]): Schem
     modified: { columns: [] },
   };
 
-  const prevMap = new Map(previous.map(s => [s.tableName, s]));
-  const currMap = new Map(current.map(s => [s.tableName, s]));
+  const prevMap = new Map(previous.map((s) => [s.tableName, s]));
+  const currMap = new Map(current.map((s) => [s.tableName, s]));
 
   // Find added tables
   for (const schema of current) {
@@ -223,8 +284,8 @@ function calculateDiff(previous: EntitySchema[], current: EntitySchema[]): Schem
     const prev = prevMap.get(curr.tableName);
     if (!prev) continue;
 
-    const prevCols = new Map(prev.columns.map(c => [c.name, c]));
-    const currCols = new Map(curr.columns.map(c => [c.name, c]));
+    const prevCols = new Map(prev.columns.map((c) => [c.name, c]));
+    const currCols = new Map(curr.columns.map((c) => [c.name, c]));
 
     // Added columns
     for (const col of curr.columns) {
@@ -256,8 +317,8 @@ function calculateDiff(previous: EntitySchema[], current: EntitySchema[]): Schem
     }
 
     // Index changes
-    const prevIdxs = new Set(prev.indexes.map(i => i.name));
-    const currIdxs = new Set(curr.indexes.map(i => i.name));
+    const prevIdxs = new Set(prev.indexes.map((i) => i.name));
+    const currIdxs = new Set(curr.indexes.map((i) => i.name));
 
     for (const idx of curr.indexes) {
       if (!prevIdxs.has(idx.name)) {
@@ -330,7 +391,7 @@ function generateMigrationName(diff: SchemaDiff): string {
   const parts: string[] = [];
 
   if (diff.added.tables.length > 0) {
-    parts.push(`add_${diff.added.tables.map(t => t.tableName).join('_')}`);
+    parts.push(`add_${diff.added.tables.map((t) => t.tableName).join('_')}`);
   }
   if (diff.removed.tables.length > 0) {
     parts.push(`drop_${diff.removed.tables.join('_')}`);
@@ -342,77 +403,11 @@ function generateMigrationName(diff: SchemaDiff): string {
   return parts.join('_') || 'schema_update';
 }
 
-async function generateTypeOrmMigrationFromDiff(
-  basePath: string,
-  diff: SchemaDiff,
-  name: string,
-  timestamp: number
-): Promise<void> {
-  const migrationsPath = path.join(basePath, 'src/database/migrations');
-  await ensureDir(migrationsPath);
-
-  const className = `${toPascalCase(name)}${timestamp}`;
-  const fileName = `${timestamp}-${name}.ts`;
-
-  let upStatements = '';
-  let downStatements = '';
-
-  // Added tables
-  for (const table of diff.added.tables) {
-    upStatements += generateCreateTableSql(table);
-    downStatements = `    await queryRunner.dropTable("${table.tableName}", true);\n` + downStatements;
-  }
-
-  // Removed tables (down restores them - simplified)
-  for (const tableName of diff.removed.tables) {
-    upStatements += `    await queryRunner.dropTable("${tableName}", true);\n`;
-  }
-
-  // Added columns
-  for (const { table, column } of diff.added.columns) {
-    upStatements += `    await queryRunner.query(\`ALTER TABLE "${table}" ADD COLUMN "${column.name}" ${column.type.toUpperCase()}${column.nullable ? '' : ' NOT NULL'}${column.default ? ` DEFAULT ${column.default}` : ''}\`);\n`;
-    downStatements = `    await queryRunner.query(\`ALTER TABLE "${table}" DROP COLUMN "${column.name}"\`);\n` + downStatements;
-  }
-
-  // Removed columns
-  for (const { table, column } of diff.removed.columns) {
-    upStatements += `    await queryRunner.query(\`ALTER TABLE "${table}" DROP COLUMN "${column}"\`);\n`;
-  }
-
-  // Modified columns
-  for (const { table, column, changes } of diff.modified.columns) {
-    if (changes.type) {
-      upStatements += `    await queryRunner.query(\`ALTER TABLE "${table}" ALTER COLUMN "${column}" TYPE ${changes.type.toUpperCase()}\`);\n`;
-    }
-    if (changes.nullable !== undefined) {
-      upStatements += `    await queryRunner.query(\`ALTER TABLE "${table}" ALTER COLUMN "${column}" ${changes.nullable ? 'DROP NOT NULL' : 'SET NOT NULL'}\`);\n`;
-    }
-  }
-
-  const content = `import { MigrationInterface, QueryRunner, Table, TableColumn, TableIndex } from "typeorm";
-
-export class ${className} implements MigrationInterface {
-  name = '${className}';
-
-  public async up(queryRunner: QueryRunner): Promise<void> {
-${upStatements || '    // No changes'}
-  }
-
-  public async down(queryRunner: QueryRunner): Promise<void> {
-${downStatements || '    // No changes'}
-  }
-}
-`;
-
-  await writeFile(path.join(migrationsPath, fileName), content);
-  console.log(chalk.green(`\n✅ Generated migration: ${fileName}`));
-}
-
 async function generatePrismaMigrationFromDiff(
   basePath: string,
   diff: SchemaDiff,
   name: string,
-  timestamp: number
+  timestamp: number,
 ): Promise<void> {
   const migrationsPath = path.join(basePath, 'prisma/migrations', `${timestamp}_${name}`);
   await ensureDir(migrationsPath);
@@ -446,32 +441,8 @@ async function generatePrismaMigrationFromDiff(
   console.log(chalk.green(`\n✅ Generated Prisma migration: ${timestamp}_${name}`));
 }
 
-function generateCreateTableSql(table: EntitySchema): string {
-  const columns = table.columns.map(col => {
-    let def = `{ name: "${col.name}", type: "${col.type}"`;
-    if (col.primary) def += ', isPrimary: true';
-    if (!col.nullable && !col.primary) def += ', isNullable: false';
-    if (col.unique && !col.primary) def += ', isUnique: true';
-    if (col.default) def += `, default: "${col.default}"`;
-    def += ' }';
-    return def;
-  });
-
-  return `
-    await queryRunner.createTable(
-      new Table({
-        name: "${table.tableName}",
-        columns: [
-          ${columns.join(',\n          ')},
-        ],
-      }),
-      true
-    );
-`;
-}
-
 function generateCreateTablePrisma(table: EntitySchema): string {
-  const columns = table.columns.map(col => {
+  const columns = table.columns.map((col) => {
     let def = `  "${col.name}" ${col.type.toUpperCase()}`;
     if (col.primary) def += ' PRIMARY KEY';
     if (!col.nullable && !col.primary) def += ' NOT NULL';
@@ -521,9 +492,8 @@ function extractLength(options: string): number | undefined {
 }
 
 function toSnakeCase(str: string): string {
-  return str.replace(/([A-Z])/g, '_$1').toLowerCase().replace(/^_/, '');
-}
-
-function toPascalCase(str: string): string {
-  return str.split(/[-_\s]+/).map(w => w.charAt(0).toUpperCase() + w.slice(1).toLowerCase()).join('');
+  return str
+    .replace(/([A-Z])/g, '_$1')
+    .toLowerCase()
+    .replace(/^_/, '');
 }

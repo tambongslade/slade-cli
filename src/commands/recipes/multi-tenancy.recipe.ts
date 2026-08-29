@@ -174,7 +174,10 @@ export class TenantMiddleware implements NestMiddleware {
   }
 }
 `;
-  await writeFile(path.join(tenantPath, 'middleware/tenant.middleware.ts'), tenantMiddlewareContent);
+  await writeFile(
+    path.join(tenantPath, 'middleware/tenant.middleware.ts'),
+    tenantMiddlewareContent,
+  );
 
   // Tenant guard
   const tenantGuardContent = `import {
@@ -244,21 +247,37 @@ export class TenantIsolationGuard implements CanActivate {
   await writeFile(path.join(tenantPath, 'guards/tenant.guard.ts'), tenantGuardContent);
 
   // Tenant-aware repository
-  const tenantRepositoryContent = `import { Repository, SelectQueryBuilder, DeepPartial } from "typeorm";
+  const tenantRepositoryContent = `import { and, eq, count, type SQL } from "drizzle-orm";
+import type { AnyPgColumn, PgTable } from "drizzle-orm/pg-core";
+import { DrizzleDb } from "@shared/database/drizzle.provider";
 import { getCurrentTenantId } from "./tenant.context";
 
 /**
  * Base interface for tenant-aware entities
  */
 export interface TenantEntity {
+  id: string;
   tenantId: string;
 }
 
 /**
- * Tenant-aware repository that automatically filters by tenant
+ * Tenant-aware repository that automatically scopes every query by the
+ * current tenant. Extend it with the table and the \`id\`/\`tenantId\` columns
+ * for your entity, e.g.:
+ *
+ *   class UsersRepository extends TenantAwareRepository<UserRow> {
+ *     constructor(@Inject(DRIZZLE) db: DrizzleDb) {
+ *       super(db, usersTable, usersTable.id, usersTable.tenantId);
+ *     }
+ *   }
  */
 export class TenantAwareRepository<T extends TenantEntity> {
-  constructor(protected readonly repository: Repository<T>) {}
+  constructor(
+    protected readonly db: DrizzleDb,
+    protected readonly table: PgTable,
+    protected readonly idColumn: AnyPgColumn,
+    protected readonly tenantIdColumn: AnyPgColumn
+  ) {}
 
   /**
    * Get current tenant ID or throw
@@ -272,54 +291,59 @@ export class TenantAwareRepository<T extends TenantEntity> {
   }
 
   /**
-   * Create query builder with tenant filter
+   * Build a WHERE condition scoped to the current tenant, optionally
+   * combined with extra conditions (e.g. an id lookup).
    */
-  createQueryBuilder(alias: string): SelectQueryBuilder<T> {
-    return this.repository
-      .createQueryBuilder(alias)
-      .where(\`\${alias}.tenantId = :tenantId\`, { tenantId: this.getTenantId() });
+  protected tenantScoped(...extra: (SQL | undefined)[]): SQL {
+    const conditions = [eq(this.tenantIdColumn, this.getTenantId()), ...extra].filter(
+      (condition): condition is SQL => Boolean(condition)
+    );
+    return and(...conditions)!;
   }
 
   /**
    * Find all entities for current tenant
    */
   async findAll(): Promise<T[]> {
-    return this.repository.find({
-      where: { tenantId: this.getTenantId() } as any,
-    });
+    const rows = await this.db.select().from(this.table).where(this.tenantScoped());
+    return rows as unknown as T[];
   }
 
   /**
    * Find one entity by ID for current tenant
    */
   async findById(id: string): Promise<T | null> {
-    return this.repository.findOne({
-      where: { id, tenantId: this.getTenantId() } as any,
-    });
+    const [row] = await this.db
+      .select()
+      .from(this.table)
+      .where(this.tenantScoped(eq(this.idColumn, id)))
+      .limit(1);
+    return (row as unknown as T) ?? null;
   }
 
   /**
    * Create entity with tenant ID
    */
-  async create(data: DeepPartial<T>): Promise<T> {
-    const entity = this.repository.create({
-      ...data,
-      tenantId: this.getTenantId(),
-    } as DeepPartial<T>);
-    return this.repository.save(entity);
+  async create(data: Partial<T>): Promise<T> {
+    const [row] = await this.db
+      .insert(this.table)
+      .values({ ...data, tenantId: this.getTenantId() } as any)
+      .returning();
+    return row as unknown as T;
   }
 
   /**
    * Update entity ensuring tenant isolation
    */
-  async update(id: string, data: DeepPartial<T>): Promise<T | null> {
+  async update(id: string, data: Partial<T>): Promise<T | null> {
     const existing = await this.findById(id);
     if (!existing) return null;
 
-    await this.repository.update(
-      { id, tenantId: this.getTenantId() } as any,
-      data as any
-    );
+    await this.db
+      .update(this.table)
+      .set(data as any)
+      .where(this.tenantScoped(eq(this.idColumn, id)));
+
     return this.findById(id);
   }
 
@@ -327,20 +351,22 @@ export class TenantAwareRepository<T extends TenantEntity> {
    * Delete entity ensuring tenant isolation
    */
   async delete(id: string): Promise<boolean> {
-    const result = await this.repository.delete({
-      id,
-      tenantId: this.getTenantId(),
-    } as any);
-    return (result.affected || 0) > 0;
+    const deleted = await this.db
+      .delete(this.table)
+      .where(this.tenantScoped(eq(this.idColumn, id)))
+      .returning({ id: this.idColumn });
+    return deleted.length > 0;
   }
 
   /**
    * Count entities for current tenant
    */
   async count(): Promise<number> {
-    return this.repository.count({
-      where: { tenantId: this.getTenantId() } as any,
-    });
+    const [result] = await this.db
+      .select({ value: count() })
+      .from(this.table)
+      .where(this.tenantScoped());
+    return result?.value ?? 0;
   }
 }
 `;
@@ -465,22 +491,34 @@ export class TenantModule implements NestModule {
   await writeFile(path.join(tenantPath, 'tenant.module.ts'), tenantModuleContent);
 
   // Index exports
-  await writeFile(path.join(tenantPath, 'index.ts'), `export * from "./tenant.context";
+  await writeFile(
+    path.join(tenantPath, 'index.ts'),
+    `export * from "./tenant.context";
 export * from "./tenant-aware.repository";
 export * from "./tenant.module";
 export * from "./middleware/tenant.middleware";
 export * from "./guards/tenant.guard";
 export * from "./decorators/tenant.decorator";
-`);
+`,
+  );
 
-  await writeFile(path.join(tenantPath, 'middleware/index.ts'), `export * from "./tenant.middleware";
-`);
+  await writeFile(
+    path.join(tenantPath, 'middleware/index.ts'),
+    `export * from "./tenant.middleware";
+`,
+  );
 
-  await writeFile(path.join(tenantPath, 'guards/index.ts'), `export * from "./tenant.guard";
-`);
+  await writeFile(
+    path.join(tenantPath, 'guards/index.ts'),
+    `export * from "./tenant.guard";
+`,
+  );
 
-  await writeFile(path.join(tenantPath, 'decorators/index.ts'), `export * from "./tenant.decorator";
-`);
+  await writeFile(
+    path.join(tenantPath, 'decorators/index.ts'),
+    `export * from "./tenant.decorator";
+`,
+  );
 
   console.log(chalk.green('  ✓ Tenant context with AsyncLocalStorage'));
   console.log(chalk.green('  ✓ Multiple tenant resolvers (subdomain, header, path, JWT)'));

@@ -87,7 +87,10 @@ const DDD_RULES = {
   },
 };
 
-export async function analyzeCode(basePath: string, options: AnalyzerOptions = {}): Promise<AnalysisReport> {
+export async function analyzeCode(
+  basePath: string,
+  options: AnalyzerOptions = {},
+): Promise<AnalysisReport> {
   console.log(chalk.bold.blue('\n🔍 Running Code Quality Analysis...\n'));
 
   const report: AnalysisReport = {
@@ -154,7 +157,12 @@ export async function analyzeCode(basePath: string, options: AnalyzerOptions = {
   return report;
 }
 
-async function analyzeFile(filePath: string, basePath: string, report: AnalysisReport, enabledRules?: string[]): Promise<void> {
+async function analyzeFile(
+  filePath: string,
+  basePath: string,
+  report: AnalysisReport,
+  enabledRules?: string[],
+): Promise<void> {
   const content = fs.readFileSync(filePath, 'utf-8');
   const lines = content.split('\n');
   const relativePath = path.relative(basePath, filePath);
@@ -170,9 +178,11 @@ async function analyzeFile(filePath: string, basePath: string, report: AnalysisR
 
   // Rule: Domain Purity
   if (isDomain && shouldRunRule('domain-purity', enabledRules)) {
-    const infraImports = content.match(/from\s+['"].*infrastructure/g) ||
-                         content.match(/from\s+['"]typeorm['"]/g) ||
-                         content.match(/from\s+['"]@nestjs\/typeorm['"]/g);
+    const infraImports =
+      content.match(/from\s+['"].*infrastructure/g) ||
+      content.match(/from\s+['"]drizzle-orm['"]/g) ||
+      content.match(/from\s+['"]drizzle-orm\/pg-core['"]/g) ||
+      content.match(/from\s+['"]drizzle-orm\/postgres-js['"]/g);
 
     if (infraImports) {
       addViolation(report, {
@@ -180,7 +190,8 @@ async function analyzeFile(filePath: string, basePath: string, report: AnalysisR
         severity: 'error',
         message: 'Domain layer imports infrastructure code',
         file: relativePath,
-        suggestion: 'Move infrastructure dependencies to infrastructure layer, use interfaces in domain',
+        suggestion:
+          'Move infrastructure dependencies to infrastructure layer, use interfaces in domain',
       });
     }
   }
@@ -236,8 +247,12 @@ async function analyzeFile(filePath: string, basePath: string, report: AnalysisR
 
   // Rule: Anemic Entity
   if (isEntity && shouldRunRule('anemic-entity', enabledRules)) {
-    const methodCount = (content.match(/(?:public|private|protected)?\s+\w+\s*\([^)]*\)\s*(?::\s*\w+)?\s*\{/g) || []).length;
-    const propertyCount = (content.match(/@Column|@PrimaryGeneratedColumn|@ManyToOne|@OneToMany/g) || []).length;
+    const methodCount = (
+      content.match(/(?:public|private|protected)?\s+\w+\s*\([^)]*\)\s*(?::\s*\w+)?\s*\{/g) || []
+    ).length;
+    const propertyCount = (
+      content.match(/@Column|@PrimaryGeneratedColumn|@ManyToOne|@OneToMany/g) || []
+    ).length;
 
     if (propertyCount > 3 && methodCount < 2) {
       addViolation(report, {
@@ -356,13 +371,13 @@ function calculateMetrics(files: string[], report: AnalysisReport): void {
   report.metrics.largestFiles = fileSizes.slice(0, 5);
 
   // Calculate test coverage estimate
-  const sourceFiles = files.filter(f => !f.includes('.spec.') && !f.includes('.test.'));
-  const testFiles = files.filter(f => f.includes('.spec.') || f.includes('.test.'));
+  const sourceFiles = files.filter((f) => !f.includes('.spec.') && !f.includes('.test.'));
+  const testFiles = files.filter((f) => f.includes('.spec.') || f.includes('.test.'));
   report.metrics.testCoverage = Math.round((testFiles.length / sourceFiles.length) * 100) || 0;
 }
 
 async function applyFixes(report: AnalysisReport): Promise<void> {
-  const fixable = report.violations.filter(v => v.autoFixable);
+  const fixable = report.violations.filter((v) => v.autoFixable);
 
   if (fixable.length === 0) {
     console.log(chalk.gray('\nNo auto-fixable issues found.'));
@@ -413,8 +428,8 @@ function printTextReport(report: AnalysisReport): void {
 
     for (const [rule, violations] of byRule) {
       const severity = violations[0].severity;
-      const color = severity === 'error' ? chalk.red :
-                    severity === 'warning' ? chalk.yellow : chalk.gray;
+      const color =
+        severity === 'error' ? chalk.red : severity === 'warning' ? chalk.yellow : chalk.gray;
 
       console.log(color(`${rule} (${violations.length})`));
       for (const v of violations.slice(0, 3)) {
@@ -432,13 +447,21 @@ function printTextReport(report: AnalysisReport): void {
   }
 }
 
-async function exportJsonReport(basePath: string, report: AnalysisReport, output?: string): Promise<void> {
+async function exportJsonReport(
+  basePath: string,
+  report: AnalysisReport,
+  output?: string,
+): Promise<void> {
   const outputPath = path.join(basePath, output || 'code-analysis.json');
   await writeFile(outputPath, JSON.stringify(report, null, 2));
   console.log(chalk.green(`\n✓ JSON report exported to ${outputPath}`));
 }
 
-async function exportHtmlReport(basePath: string, report: AnalysisReport, output?: string): Promise<void> {
+async function exportHtmlReport(
+  basePath: string,
+  report: AnalysisReport,
+  output?: string,
+): Promise<void> {
   const outputPath = path.join(basePath, output || 'code-analysis.html');
 
   const html = `<!DOCTYPE html>
@@ -479,13 +502,17 @@ async function exportHtmlReport(basePath: string, report: AnalysisReport, output
   </div>
 
   <h2>Violations</h2>
-  ${report.violations.map(v => `
+  ${report.violations
+    .map(
+      (v) => `
     <div class="violation ${v.severity}">
       <strong>${v.rule}</strong> - ${v.file}${v.line ? `:${v.line}` : ''}
       <p>${v.message}</p>
       ${v.suggestion ? `<p class="suggestion">💡 ${v.suggestion}</p>` : ''}
     </div>
-  `).join('')}
+  `,
+    )
+    .join('')}
 </body>
 </html>`;
 
@@ -518,8 +545,12 @@ export function listRules(): void {
   console.log(chalk.bold.blue('\n📋 Available Analysis Rules\n'));
 
   for (const [name, config] of Object.entries(DDD_RULES)) {
-    const severityColor = config.severity === 'error' ? chalk.red :
-                          config.severity === 'warning' ? chalk.yellow : chalk.gray;
+    const severityColor =
+      config.severity === 'error'
+        ? chalk.red
+        : config.severity === 'warning'
+          ? chalk.yellow
+          : chalk.gray;
     console.log(`  ${chalk.cyan(name.padEnd(25))} ${severityColor(`[${config.severity}]`)}`);
     console.log(chalk.gray(`    ${config.description}`));
   }

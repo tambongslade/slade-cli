@@ -347,7 +347,7 @@ describe('Command Generators', () => {
         getDryRunFiles().some(
           (change) =>
             path.dirname(change.filePath) === migrationsPath &&
-            path.basename(change.filePath).endsWith('-AccountingBaseline.ts'),
+            path.basename(change.filePath).endsWith('_AccountingBaseline.sql'),
         ),
       ).toBe(true);
     });
@@ -369,7 +369,7 @@ describe('Command Generators', () => {
         getDryRunFiles().some(
           (change) =>
             path.dirname(change.filePath) === migrationsPath &&
-            path.basename(change.filePath).endsWith('-CustomerSettlementFields.ts'),
+            path.basename(change.filePath).endsWith('_CustomerSettlementFields.sql'),
         ),
       ).toBe(true);
     });

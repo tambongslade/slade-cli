@@ -435,8 +435,10 @@ async function checkImportPatterns(modulesPath: string, report: DoctorReport): P
       if (
         content.includes("from '../infrastructure") ||
         content.includes("from './infrastructure") ||
-        content.includes('from "@nestjs/typeorm"') ||
-        content.includes('from "typeorm"')
+        content.includes('from "drizzle-orm"') ||
+        content.includes("from 'drizzle-orm'") ||
+        content.includes('drizzle-orm/pg-core') ||
+        content.includes('drizzle-orm/postgres-js')
       ) {
         report.errors++;
         report.results.push({

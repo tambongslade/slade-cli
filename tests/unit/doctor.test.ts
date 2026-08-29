@@ -130,7 +130,7 @@ describe('Enhanced doctor project layout resolution', () => {
     });
     await fs.writeFile(
       path.join(projectPath, 'src/modules/billing/application/domain/entities/invoice.entity.ts'),
-      'import { Entity } from "typeorm";\nexport class InvoiceEntity {}\n',
+      'import { pgTable } from "drizzle-orm/pg-core";\nexport class InvoiceEntity {}\n',
     );
 
     const report = await runEnhancedDoctor(projectPath);

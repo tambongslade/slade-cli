@@ -15,7 +15,7 @@ interface ConfigPreset {
 }
 
 interface DddConfig {
-  orm: 'typeorm' | 'prisma';
+  orm: 'drizzle' | 'prisma';
   database: 'postgres' | 'mysql' | 'sqlite' | 'mongodb';
   features: {
     graphql: boolean;
@@ -42,11 +42,11 @@ interface DddConfig {
 }
 
 const PRESETS: Record<string, ConfigPreset> = {
-  'minimal': {
+  minimal: {
     name: 'Minimal',
-    description: 'Basic DDD structure with TypeORM and REST API',
+    description: 'Basic DDD structure with Drizzle and REST API',
     config: {
-      orm: 'typeorm',
+      orm: 'drizzle',
       database: 'postgres',
       features: {
         graphql: false,
@@ -72,11 +72,11 @@ const PRESETS: Record<string, ConfigPreset> = {
       },
     },
   },
-  'standard': {
+  standard: {
     name: 'Standard',
     description: 'Full DDD with CQRS, Swagger, and test factories',
     config: {
-      orm: 'typeorm',
+      orm: 'drizzle',
       database: 'postgres',
       features: {
         graphql: false,
@@ -102,11 +102,11 @@ const PRESETS: Record<string, ConfigPreset> = {
       },
     },
   },
-  'enterprise': {
+  enterprise: {
     name: 'Enterprise',
     description: 'Full-featured with GraphQL, CQRS, Event Sourcing',
     config: {
-      orm: 'typeorm',
+      orm: 'drizzle',
       database: 'postgres',
       features: {
         graphql: true,
@@ -132,7 +132,7 @@ const PRESETS: Record<string, ConfigPreset> = {
       },
     },
   },
-  'prisma': {
+  prisma: {
     name: 'Prisma',
     description: 'Prisma ORM with modern TypeScript patterns',
     config: {
@@ -162,11 +162,11 @@ const PRESETS: Record<string, ConfigPreset> = {
       },
     },
   },
-  'graphql': {
+  graphql: {
     name: 'GraphQL First',
     description: 'GraphQL-centric with code-first schema generation',
     config: {
-      orm: 'typeorm',
+      orm: 'drizzle',
       database: 'postgres',
       features: {
         graphql: true,
@@ -213,7 +213,7 @@ async function selectOption(
   rl: readline.Interface,
   prompt: string,
   options: string[],
-  defaultIndex: number = 0
+  defaultIndex: number = 0,
 ): Promise<string> {
   console.log(chalk.cyan(`\n${prompt}`));
   options.forEach((opt, i) => {
@@ -230,7 +230,11 @@ async function selectOption(
   return options[defaultIndex];
 }
 
-async function confirm(rl: readline.Interface, prompt: string, defaultYes: boolean = true): Promise<boolean> {
+async function confirm(
+  rl: readline.Interface,
+  prompt: string,
+  defaultYes: boolean = true,
+): Promise<boolean> {
   const hint = defaultYes ? '[Y/n]' : '[y/N]';
   const answer = await question(rl, chalk.cyan(`${prompt} ${hint}: `));
 
@@ -308,17 +312,17 @@ async function customizeConfig(rl: readline.Interface, config: DddConfig): Promi
   const ormChoice = await selectOption(
     rl,
     'Select ORM:',
-    ['typeorm', 'prisma'],
-    config.orm === 'prisma' ? 1 : 0
+    ['drizzle', 'prisma'],
+    config.orm === 'prisma' ? 1 : 0,
   );
-  config.orm = ormChoice as 'typeorm' | 'prisma';
+  config.orm = ormChoice as 'drizzle' | 'prisma';
 
   // Database
   const dbChoice = await selectOption(
     rl,
     'Select Database:',
     ['postgres', 'mysql', 'sqlite', 'mongodb'],
-    ['postgres', 'mysql', 'sqlite', 'mongodb'].indexOf(config.database)
+    ['postgres', 'mysql', 'sqlite', 'mongodb'].indexOf(config.database),
   );
   config.database = dbChoice as any;
 
@@ -327,7 +331,11 @@ async function customizeConfig(rl: readline.Interface, config: DddConfig): Promi
   config.features.graphql = await confirm(rl, '  Enable GraphQL?', config.features.graphql);
   config.features.swagger = await confirm(rl, '  Enable Swagger/OpenAPI?', config.features.swagger);
   config.features.cqrs = await confirm(rl, '  Enable CQRS pattern?', config.features.cqrs);
-  config.features.eventSourcing = await confirm(rl, '  Enable Event Sourcing?', config.features.eventSourcing);
+  config.features.eventSourcing = await confirm(
+    rl,
+    '  Enable Event Sourcing?',
+    config.features.eventSourcing,
+  );
 
   // Testing
   console.log(chalk.cyan('\nTesting:'));
@@ -335,16 +343,20 @@ async function customizeConfig(rl: readline.Interface, config: DddConfig): Promi
     rl,
     'Test framework:',
     ['jest', 'vitest'],
-    config.testing.framework === 'vitest' ? 1 : 0
+    config.testing.framework === 'vitest' ? 1 : 0,
   );
   config.testing.framework = testFramework as 'jest' | 'vitest';
   config.testing.e2e = await confirm(rl, '  Generate E2E tests?', config.testing.e2e);
-  config.testing.factories = await confirm(rl, '  Generate test factories?', config.testing.factories);
+  config.testing.factories = await confirm(
+    rl,
+    '  Generate test factories?',
+    config.testing.factories,
+  );
 }
 
 async function buildCustomConfig(rl: readline.Interface): Promise<DddConfig> {
   const config: DddConfig = {
-    orm: 'typeorm',
+    orm: 'drizzle',
     database: 'postgres',
     features: {
       graphql: false,
@@ -392,7 +404,9 @@ function printConfigSummary(config: DddConfig): void {
   console.log(`  GraphQL:    ${config.features.graphql ? chalk.green('✓') : chalk.gray('✗')}`);
   console.log(`  Swagger:    ${config.features.swagger ? chalk.green('✓') : chalk.gray('✗')}`);
   console.log(`  CQRS:       ${config.features.cqrs ? chalk.green('✓') : chalk.gray('✗')}`);
-  console.log(`  Testing:    ${chalk.cyan(config.testing.framework)}${config.testing.e2e ? ' + E2E' : ''}`);
+  console.log(
+    `  Testing:    ${chalk.cyan(config.testing.framework)}${config.testing.e2e ? ' + E2E' : ''}`,
+  );
   console.log(chalk.gray('─────────────────────────────────────\n'));
 }
 

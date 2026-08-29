@@ -9,14 +9,12 @@ export async function applyEventBackboneRecipe(basePath: string) {
   const eventBackbonePath = path.join(sharedPath, 'event-backbone');
   const entitiesPath = path.join(eventBackbonePath, 'entities');
   const publishersPath = path.join(eventBackbonePath, 'publishers');
-  const migrationsPath = path.join(basePath, 'src/migrations');
 
   await applyBusinessReferenceIdentifiersRecipe(basePath);
   await applyPlatformContextRecipe(basePath);
   await ensureDir(eventBackbonePath);
   await ensureDir(entitiesPath);
   await ensureDir(publishersPath);
-  await ensureDir(migrationsPath);
 
   const constantsContent = `export const EVENT_BACKBONE_PUBLISHER = Symbol("EVENT_BACKBONE_PUBLISHER");
 
@@ -49,7 +47,19 @@ export const EVENT_BACKBONE_ENV = {
 
   await writeFile(path.join(eventBackbonePath, 'event-backbone.constants.ts'), constantsContent);
 
-  const typesContent = `export type EventPayload = Record<string, unknown>;
+  const typesContent = `import type { DrizzleDb } from "@shared/database/drizzle.provider";
+
+export type EventPayload = Record<string, unknown>;
+
+/**
+ * The transaction handle produced by \`db.transaction(async (tx) => ...)\`.
+ * Derived structurally from \`DrizzleDb\` so it always matches the installed
+ * drizzle-orm version, and it deliberately carries members (like \`rollback\`)
+ * that a plain \`DrizzleDb\` doesn't — passing the top-level \`db\` where a
+ * \`DrizzleTransaction\` is expected is a type error, which is what enforces
+ * "this must run inside an active transaction" at compile time.
+ */
+export type DrizzleTransaction = Parameters<Parameters<DrizzleDb["transaction"]>[0]>[0];
 
 export enum EventPiiClassification {
   None = "NONE",
@@ -253,156 +263,140 @@ export class RelayHttpNonRetryableError extends Error {
   await writeFile(path.join(eventBackbonePath, 'event-backbone.errors.ts'), errorsContent);
 
   const eventStoreEntityContent = `import {
-  Column,
-  CreateDateColumn,
-  Entity,
-  Index,
-  PrimaryGeneratedColumn,
-  Unique,
-} from "typeorm";
+  bigserial,
+  index,
+  integer,
+  jsonb,
+  pgTable,
+  timestamp,
+  uniqueIndex,
+  uuid,
+  varchar,
+} from "drizzle-orm/pg-core";
 
-@Entity({ name: "event_store" })
-@Unique("uq_event_store_stream_version", ["streamId", "version"])
-@Index("idx_event_store_stream", ["streamId"])
-@Index("idx_event_store_type", ["type"])
-@Index("idx_event_store_aggregate", ["aggregateType", "aggregateId"])
-export class EventStoreOrmEntity {
-  @PrimaryGeneratedColumn("increment", { type: "bigint", name: "global_seq" })
-  globalSeq!: string;
+/**
+ * Append-only event store: the source of truth for every domain event.
+ * \`idx_event_store_event_id\` is a UNIQUE index — it's what makes replay
+ * safe: re-appending an event with the same eventId (e.g. after a retried
+ * write) fails with a unique violation instead of duplicating history.
+ */
+export const eventStoreTable = pgTable(
+  "event_store",
+  {
+    globalSeq: bigserial("global_seq", { mode: "bigint" }).primaryKey(),
+    eventId: uuid("event_id").notNull(),
+    reference: varchar("reference", { length: 96 }),
+    streamId: varchar("stream_id", { length: 160 }).notNull(),
+    version: integer("version").notNull(),
+    type: varchar("type", { length: 160 }).notNull(),
+    aggregateType: varchar("aggregate_type", { length: 96 }).notNull(),
+    aggregateId: varchar("aggregate_id", { length: 96 }).notNull(),
+    payload: jsonb("payload").notNull().$type<Record<string, unknown>>(),
+    metadata: jsonb("metadata").notNull().default({}).$type<Record<string, unknown>>(),
+    occurredAt: timestamp("occurred_at", { withTimezone: true }).notNull(),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (table) => ({
+    uqStreamVersion: uniqueIndex("uq_event_store_stream_version").on(
+      table.streamId,
+      table.version,
+    ),
+    idxStream: index("idx_event_store_stream").on(table.streamId),
+    idxEventId: uniqueIndex("idx_event_store_event_id").on(table.eventId),
+    idxType: index("idx_event_store_type").on(table.type),
+    idxAggregate: index("idx_event_store_aggregate").on(
+      table.aggregateType,
+      table.aggregateId,
+    ),
+  }),
+);
 
-  @Column({ type: "uuid", name: "event_id" })
-  eventId!: string;
-
-  @Column({ type: "varchar", length: 96, nullable: true })
-  reference!: string | null;
-
-  @Column({ type: "varchar", length: 160, name: "stream_id" })
-  streamId!: string;
-
-  @Column({ type: "int" })
-  version!: number;
-
-  @Column({ type: "varchar", length: 160 })
-  type!: string;
-
-  @Column({ type: "varchar", length: 96, name: "aggregate_type" })
-  aggregateType!: string;
-
-  @Column({ type: "varchar", length: 96, name: "aggregate_id" })
-  aggregateId!: string;
-
-  @Column({ type: "jsonb" })
-  payload!: Record<string, unknown>;
-
-  @Column({ type: "jsonb", default: () => "'{}'::jsonb" })
-  metadata!: Record<string, unknown>;
-
-  @Column({ type: "timestamptz", name: "occurred_at" })
-  occurredAt!: Date;
-
-  @CreateDateColumn({ type: "timestamptz", name: "created_at" })
-  createdAt!: Date;
-}
+export type EventStoreRow = typeof eventStoreTable.$inferSelect;
+export type NewEventStoreRow = typeof eventStoreTable.$inferInsert;
 `;
 
   await writeFile(path.join(entitiesPath, 'event-store.orm-entity.ts'), eventStoreEntityContent);
 
-  const outboxEntityContent = `import {
-  Column,
-  CreateDateColumn,
-  Entity,
-  Index,
-  PrimaryColumn,
-  UpdateDateColumn,
-} from "typeorm";
+  const outboxEntityContent = `import { sql } from "drizzle-orm";
+import {
+  check,
+  index,
+  integer,
+  jsonb,
+  pgTable,
+  text,
+  timestamp,
+  uniqueIndex,
+  uuid,
+  varchar,
+} from "drizzle-orm/pg-core";
 import { OutboxEventStatus } from "../event-backbone.types";
 
-@Entity({ name: "outbox_events" })
-@Index("idx_outbox_events_status_available", ["status", "availableAt"])
-@Index("idx_outbox_events_aggregate", ["aggregateType", "aggregateId"])
-@Index("idx_outbox_events_reference", ["reference"], {
-  unique: true,
-  where: '"reference" IS NOT NULL',
-})
-export class OutboxEventOrmEntity {
-  @PrimaryColumn({ type: "uuid" })
-  id!: string;
+/**
+ * Transactional outbox: rows are written in the same DB transaction as the
+ * business/event-store write (see OutboxService.enqueue), then relayed to
+ * the configured transport by OutboxRelayService. \`idx_outbox_events_reference\`
+ * is a partial UNIQUE index so a caller-supplied idempotency reference can
+ * never be enqueued twice.
+ */
+export const outboxEventsTable = pgTable(
+  "outbox_events",
+  {
+    id: uuid("id").primaryKey(),
+    reference: varchar("reference", { length: 96 }),
+    eventType: varchar("event_type", { length: 160 }).notNull(),
+    source: varchar("source", { length: 160 }).notNull(),
+    aggregateType: varchar("aggregate_type", { length: 96 }).notNull(),
+    aggregateId: varchar("aggregate_id", { length: 96 }).notNull(),
+    streamId: varchar("stream_id", { length: 160 }).notNull(),
+    version: integer("version").notNull(),
+    subject: varchar("subject", { length: 160 }),
+    payload: jsonb("payload").notNull().$type<Record<string, unknown>>(),
+    metadata: jsonb("metadata").notNull().default({}).$type<Record<string, unknown>>(),
+    status: varchar("status", { length: 20 }).notNull().default(OutboxEventStatus.Pending),
+    attempts: integer("attempts").notNull().default(0),
+    availableAt: timestamp("available_at", { withTimezone: true }).notNull(),
+    occurredAt: timestamp("occurred_at", { withTimezone: true }).notNull(),
+    publishedAt: timestamp("published_at", { withTimezone: true }),
+    lastError: text("last_error"),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+    updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (table) => ({
+    idxStatusAvailable: index("idx_outbox_events_status_available").on(
+      table.status,
+      table.availableAt,
+    ),
+    idxAggregate: index("idx_outbox_events_aggregate").on(
+      table.aggregateType,
+      table.aggregateId,
+    ),
+    idxReference: uniqueIndex("idx_outbox_events_reference")
+      .on(table.reference)
+      .where(sql\`"reference" IS NOT NULL\`),
+    statusCheck: check(
+      "chk_outbox_events_status",
+      sql\`\${table.status} IN ('PENDING', 'PUBLISHING', 'PUBLISHED', 'FAILED')\`,
+    ),
+  }),
+);
 
-  @Column({ type: "varchar", length: 96, nullable: true })
-  reference!: string | null;
-
-  @Column({ type: "varchar", length: 160, name: "event_type" })
-  eventType!: string;
-
-  @Column({ type: "varchar", length: 160 })
-  source!: string;
-
-  @Column({ type: "varchar", length: 96, name: "aggregate_type" })
-  aggregateType!: string;
-
-  @Column({ type: "varchar", length: 96, name: "aggregate_id" })
-  aggregateId!: string;
-
-  @Column({ type: "varchar", length: 160, name: "stream_id" })
-  streamId!: string;
-
-  @Column({ type: "int" })
-  version!: number;
-
-  @Column({ type: "varchar", length: 160, nullable: true })
-  subject!: string | null;
-
-  @Column({ type: "jsonb" })
-  payload!: Record<string, unknown>;
-
-  @Column({ type: "jsonb", default: () => "'{}'::jsonb" })
-  metadata!: Record<string, unknown>;
-
-  @Column({
-    type: "varchar",
-    length: 20,
-    default: OutboxEventStatus.Pending,
-  })
-  status!: OutboxEventStatus;
-
-  @Column({ type: "int", default: 0 })
-  attempts!: number;
-
-  @Column({ type: "timestamptz", name: "available_at" })
-  availableAt!: Date;
-
-  @Column({ type: "timestamptz", name: "occurred_at" })
-  occurredAt!: Date;
-
-  @Column({ type: "timestamptz", name: "published_at", nullable: true })
-  publishedAt!: Date | null;
-
-  @Column({ type: "text", name: "last_error", nullable: true })
-  lastError!: string | null;
-
-  @CreateDateColumn({ type: "timestamptz", name: "created_at" })
-  createdAt!: Date;
-
-  @UpdateDateColumn({ type: "timestamptz", name: "updated_at" })
-  updatedAt!: Date;
-}
+export type OutboxEventRow = typeof outboxEventsTable.$inferSelect;
+export type NewOutboxEventRow = typeof outboxEventsTable.$inferInsert;
 `;
 
   await writeFile(path.join(entitiesPath, 'outbox-event.orm-entity.ts'), outboxEntityContent);
 
-  const checkpointEntityContent = `import { Column, Entity, PrimaryColumn, UpdateDateColumn } from "typeorm";
+  const checkpointEntityContent = `import { bigint, pgTable, timestamp, varchar } from "drizzle-orm/pg-core";
 
-@Entity({ name: "projection_checkpoints" })
-export class ProjectionCheckpointOrmEntity {
-  @PrimaryColumn({ type: "varchar", length: 120 })
-  projection!: string;
+export const projectionCheckpointsTable = pgTable("projection_checkpoints", {
+  projection: varchar("projection", { length: 120 }).primaryKey(),
+  lastSeq: bigint("last_seq", { mode: "bigint" }).notNull().default(0n),
+  updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
+});
 
-  @Column({ type: "bigint", name: "last_seq", default: "0" })
-  lastSeq!: string;
-
-  @UpdateDateColumn({ type: "timestamptz", name: "updated_at" })
-  updatedAt!: Date;
-}
+export type ProjectionCheckpointRow = typeof projectionCheckpointsTable.$inferSelect;
+export type NewProjectionCheckpointRow = typeof projectionCheckpointsTable.$inferInsert;
 `;
 
   await writeFile(
@@ -411,27 +405,29 @@ export class ProjectionCheckpointOrmEntity {
   );
 
   const eventStoreServiceContent = `import { randomUUID } from "crypto";
-import { Injectable } from "@nestjs/common";
-import { DataSource, EntityManager, MoreThan } from "typeorm";
+import { Inject, Injectable } from "@nestjs/common";
+import { asc, desc, eq, gt } from "drizzle-orm";
+import { DRIZZLE, DrizzleDb } from "@shared/database/drizzle.provider";
 import {
   AppendDomainEventsInput,
+  DrizzleTransaction,
   StoredDomainEvent,
 } from "./event-backbone.types";
 import { EventStreamConcurrencyError } from "./event-backbone.errors";
-import { EventStoreOrmEntity } from "./entities/event-store.orm-entity";
-import { ProjectionCheckpointOrmEntity } from "./entities/projection-checkpoint.orm-entity";
+import { EventStoreRow, eventStoreTable } from "./entities/event-store.orm-entity";
+import { projectionCheckpointsTable } from "./entities/projection-checkpoint.orm-entity";
 
 @Injectable()
 export class EventStoreService {
-  constructor(private readonly dataSource: DataSource) {}
+  constructor(@Inject(DRIZZLE) private readonly db: DrizzleDb) {}
 
   async append(
     input: AppendDomainEventsInput,
-    manager: EntityManager,
+    tx: DrizzleTransaction,
   ): Promise<StoredDomainEvent[]> {
-    this.assertActiveTransaction(manager);
+    this.assertActiveTransaction(tx);
 
-    const currentVersion = await this.currentVersion(input.streamId, manager);
+    const currentVersion = await this.currentVersion(input.streamId, tx);
     if (
       typeof input.expectedVersion === "number" &&
       input.expectedVersion !== currentVersion
@@ -443,25 +439,22 @@ export class EventStoreService {
       );
     }
 
-    const repository = manager.getRepository(EventStoreOrmEntity);
-    const entities = input.events.map((event, index) =>
-      repository.create({
-        eventId: randomUUID(),
-        reference: event.reference ?? null,
-        streamId: input.streamId,
-        version: currentVersion + index + 1,
-        type: event.type,
-        aggregateType: event.aggregateType,
-        aggregateId: event.aggregateId,
-        payload: event.payload,
-        metadata: event.metadata ?? {},
-        occurredAt: event.occurredAt ?? new Date(),
-      }),
-    );
+    const rows = input.events.map((event, index) => ({
+      eventId: randomUUID(),
+      reference: event.reference ?? null,
+      streamId: input.streamId,
+      version: currentVersion + index + 1,
+      type: event.type,
+      aggregateType: event.aggregateType,
+      aggregateId: event.aggregateId,
+      payload: event.payload,
+      metadata: event.metadata ?? {},
+      occurredAt: event.occurredAt ?? new Date(),
+    }));
 
     try {
-      const saved = await repository.save(entities);
-      return saved.map((entity) => this.toStoredEvent(entity));
+      const saved = await tx.insert(eventStoreTable).values(rows).returning();
+      return saved.map((row) => this.toStoredEvent(row));
     } catch (error) {
       if (!this.isUniqueViolation(error)) {
         throw error;
@@ -475,52 +468,65 @@ export class EventStoreService {
     }
   }
 
-  async currentVersion(streamId: string, manager?: EntityManager): Promise<number> {
-    const repository = (manager ?? this.dataSource.manager).getRepository(EventStoreOrmEntity);
-    const latest = await repository.findOne({
-      where: { streamId },
-      order: { version: "DESC" },
-    });
+  async currentVersion(
+    streamId: string,
+    manager: DrizzleDb | DrizzleTransaction = this.db,
+  ): Promise<number> {
+    const [latest] = await manager
+      .select({ version: eventStoreTable.version })
+      .from(eventStoreTable)
+      .where(eq(eventStoreTable.streamId, streamId))
+      .orderBy(desc(eventStoreTable.version))
+      .limit(1);
 
     return latest?.version ?? 0;
   }
 
   async readStream(streamId: string): Promise<StoredDomainEvent[]> {
-    const events = await this.dataSource.getRepository(EventStoreOrmEntity).find({
-      where: { streamId },
-      order: { version: "ASC" },
-    });
+    const rows = await this.db
+      .select()
+      .from(eventStoreTable)
+      .where(eq(eventStoreTable.streamId, streamId))
+      .orderBy(asc(eventStoreTable.version));
 
-    return events.map((event) => this.toStoredEvent(event));
+    return rows.map((row) => this.toStoredEvent(row));
   }
 
   async readAfter(globalSeq: string, limit = 100): Promise<StoredDomainEvent[]> {
-    const events = await this.dataSource.getRepository(EventStoreOrmEntity).find({
-      where: { globalSeq: MoreThan(globalSeq) },
-      order: { globalSeq: "ASC" },
-      take: limit,
-    });
+    const rows = await this.db
+      .select()
+      .from(eventStoreTable)
+      .where(gt(eventStoreTable.globalSeq, BigInt(globalSeq)))
+      .orderBy(asc(eventStoreTable.globalSeq))
+      .limit(limit);
 
-    return events.map((event) => this.toStoredEvent(event));
+    return rows.map((row) => this.toStoredEvent(row));
   }
 
   async checkpoint(projection: string, lastSeq: string): Promise<void> {
-    await this.dataSource.getRepository(ProjectionCheckpointOrmEntity).upsert(
-      { projection, lastSeq },
-      ["projection"],
-    );
+    const value = BigInt(lastSeq);
+
+    await this.db
+      .insert(projectionCheckpointsTable)
+      .values({ projection, lastSeq: value, updatedAt: new Date() })
+      .onConflictDoUpdate({
+        target: projectionCheckpointsTable.projection,
+        set: { lastSeq: value, updatedAt: new Date() },
+      });
   }
 
   async checkpointFor(projection: string): Promise<string> {
-    const checkpoint = await this.dataSource
-      .getRepository(ProjectionCheckpointOrmEntity)
-      .findOne({ where: { projection } });
+    const [row] = await this.db
+      .select({ lastSeq: projectionCheckpointsTable.lastSeq })
+      .from(projectionCheckpointsTable)
+      .where(eq(projectionCheckpointsTable.projection, projection))
+      .limit(1);
 
-    return checkpoint?.lastSeq ?? "0";
+    return row ? row.lastSeq.toString() : "0";
   }
 
-  private assertActiveTransaction(manager: EntityManager): void {
-    if (!manager.queryRunner?.isTransactionActive) {
+  private assertActiveTransaction(tx: DrizzleTransaction): void {
+    if (typeof (tx as { rollback?: unknown }).rollback !== "function") {
       throw new Error("Event store append must run inside an active transaction");
     }
   }
@@ -534,20 +540,20 @@ export class EventStoreService {
     );
   }
 
-  private toStoredEvent(entity: EventStoreOrmEntity): StoredDomainEvent {
+  private toStoredEvent(row: EventStoreRow): StoredDomainEvent {
     return {
-      globalSeq: entity.globalSeq,
-      eventId: entity.eventId,
-      reference: entity.reference,
-      streamId: entity.streamId,
-      version: entity.version,
-      type: entity.type,
-      aggregateType: entity.aggregateType,
-      aggregateId: entity.aggregateId,
-      payload: entity.payload,
-      metadata: entity.metadata,
-      occurredAt: entity.occurredAt,
-      createdAt: entity.createdAt,
+      globalSeq: row.globalSeq.toString(),
+      eventId: row.eventId,
+      reference: row.reference,
+      streamId: row.streamId,
+      version: row.version,
+      type: row.type,
+      aggregateType: row.aggregateType,
+      aggregateId: row.aggregateId,
+      payload: row.payload,
+      metadata: row.metadata,
+      occurredAt: row.occurredAt,
+      createdAt: row.createdAt,
     };
   }
 }
@@ -555,58 +561,61 @@ export class EventStoreService {
 
   await writeFile(path.join(eventBackbonePath, 'event-store.service.ts'), eventStoreServiceContent);
 
-  const outboxServiceContent = `import { Injectable } from "@nestjs/common";
-import { DataSource, EntityManager } from "typeorm";
+  const outboxServiceContent = `import { Inject, Injectable } from "@nestjs/common";
+import { DRIZZLE, DrizzleDb } from "@shared/database/drizzle.provider";
 import {
+  DrizzleTransaction,
   OutboxEventStatus,
   OutboxPublishInput,
 } from "./event-backbone.types";
 import { OutboxTransactionRequiredError } from "./event-backbone.errors";
-import { OutboxEventOrmEntity } from "./entities/outbox-event.orm-entity";
+import { OutboxEventRow, outboxEventsTable } from "./entities/outbox-event.orm-entity";
 
 @Injectable()
 export class OutboxService {
-  constructor(private readonly dataSource: DataSource) {}
+  constructor(@Inject(DRIZZLE) private readonly db: DrizzleDb) {}
 
   async enqueue(
     input: OutboxPublishInput,
-    manager: EntityManager,
-  ): Promise<OutboxEventOrmEntity> {
-    if (!manager.queryRunner?.isTransactionActive) {
+    tx: DrizzleTransaction,
+  ): Promise<OutboxEventRow> {
+    if (typeof (tx as { rollback?: unknown }).rollback !== "function") {
       throw new OutboxTransactionRequiredError();
     }
 
     const now = new Date();
-    const repository = manager.getRepository(OutboxEventOrmEntity);
-    const event = repository.create({
-      id: input.eventId,
-      reference: input.reference ?? null,
-      eventType: input.type,
-      source: input.source,
-      aggregateType: input.aggregateType,
-      aggregateId: input.aggregateId,
-      streamId: input.streamId,
-      version: input.version,
-      subject: input.subject ?? null,
-      payload: input.payload,
-      metadata: input.metadata ?? {},
-      status: OutboxEventStatus.Pending,
-      attempts: 0,
-      availableAt: now,
-      occurredAt: input.occurredAt ?? now,
-      publishedAt: null,
-      lastError: null,
-    });
+    const [row] = await tx
+      .insert(outboxEventsTable)
+      .values({
+        id: input.eventId,
+        reference: input.reference ?? null,
+        eventType: input.type,
+        source: input.source,
+        aggregateType: input.aggregateType,
+        aggregateId: input.aggregateId,
+        streamId: input.streamId,
+        version: input.version,
+        subject: input.subject ?? null,
+        payload: input.payload,
+        metadata: input.metadata ?? {},
+        status: OutboxEventStatus.Pending,
+        attempts: 0,
+        availableAt: now,
+        occurredAt: input.occurredAt ?? now,
+        publishedAt: null,
+        lastError: null,
+      })
+      .returning();
 
-    return repository.save(event);
+    return row!;
   }
 
   async enqueueInTransaction<T>(
-    work: (manager: EntityManager) => Promise<{ result: T; event: OutboxPublishInput }>,
+    work: (tx: DrizzleTransaction) => Promise<{ result: T; event: OutboxPublishInput }>,
   ): Promise<T> {
-    return this.dataSource.transaction(async (manager) => {
-      const { result, event } = await work(manager);
-      await this.enqueue(event, manager);
+    return this.db.transaction(async (tx) => {
+      const { result, event } = await work(tx);
+      await this.enqueue(event, tx);
       return result;
     });
   }
@@ -830,7 +839,8 @@ export class PulsarEventPublisher implements EventBackbonePublisher, OnModuleDes
   const relayServiceContent = `import { Inject, Injectable, Logger } from "@nestjs/common";
 import { ConfigService } from "@nestjs/config";
 import { Interval } from "@nestjs/schedule";
-import { DataSource } from "typeorm";
+import { eq, sql } from "drizzle-orm";
+import { DRIZZLE, DrizzleDb } from "@shared/database/drizzle.provider";
 import {
   EVENT_BACKBONE_ENV,
   EVENT_BACKBONE_PUBLISHER,
@@ -841,7 +851,7 @@ import type {
   EventBackbonePublisher,
 } from "./event-backbone.types";
 import { OutboxEventStatus } from "./event-backbone.types";
-import { OutboxEventOrmEntity } from "./entities/outbox-event.orm-entity";
+import { outboxEventsTable } from "./entities/outbox-event.orm-entity";
 
 interface ClaimedOutboxRow {
   id: string;
@@ -865,7 +875,7 @@ export class OutboxRelayService {
   private running = false;
 
   constructor(
-    private readonly dataSource: DataSource,
+    @Inject(DRIZZLE) private readonly db: DrizzleDb,
     private readonly configService: ConfigService,
     @Inject(EVENT_BACKBONE_PUBLISHER)
     private readonly publisher: EventBackbonePublisher,
@@ -904,44 +914,42 @@ export class OutboxRelayService {
     const batchSize = this.integerEnv(EVENT_BACKBONE_ENV.relayBatchSize, 50);
     const maxAttempts = this.integerEnv(EVENT_BACKBONE_ENV.relayMaxAttempts, 10);
 
-    return this.dataSource.transaction(async (manager) => {
-      const result = await manager.query(
-        "UPDATE outbox_events " +
-          "SET status = $1, attempts = attempts + 1, updated_at = now() " +
-          "WHERE id IN (" +
-          "SELECT id FROM outbox_events " +
-          "WHERE ((status IN ($2, $3) AND available_at <= now()) " +
-          "OR (status = $4 AND updated_at < now() - interval '5 minutes')) " +
-          "AND attempts < $5 " +
-          "ORDER BY available_at ASC " +
-          "LIMIT $6 " +
-          "FOR UPDATE SKIP LOCKED" +
-          ") RETURNING *",
-        [
-          OutboxEventStatus.Publishing,
-          OutboxEventStatus.Pending,
-          OutboxEventStatus.Failed,
-          OutboxEventStatus.Publishing,
-          maxAttempts,
-          batchSize,
-        ],
-      );
+    return this.db.transaction(async (tx) => {
+      // Raw SQL (not the query builder): this needs FOR UPDATE SKIP LOCKED so
+      // concurrent relay instances never claim the same row twice, which the
+      // typed query builder has no equivalent for.
+      const result = await tx.execute(sql\`
+        UPDATE outbox_events
+        SET status = \${OutboxEventStatus.Publishing}, attempts = attempts + 1, updated_at = now()
+        WHERE id IN (
+          SELECT id FROM outbox_events
+          WHERE ((status IN (\${OutboxEventStatus.Pending}, \${OutboxEventStatus.Failed}) AND available_at <= now())
+            OR (status = \${OutboxEventStatus.Publishing} AND updated_at < now() - interval '5 minutes'))
+          AND attempts < \${maxAttempts}
+          ORDER BY available_at ASC
+          LIMIT \${batchSize}
+          FOR UPDATE SKIP LOCKED
+        )
+        RETURNING *
+      \`);
 
       const rows = Array.isArray(result[0]) ? result[0] : result;
-      return rows as ClaimedOutboxRow[];
+      return rows as unknown as ClaimedOutboxRow[];
     });
   }
 
   private async publishRow(row: ClaimedOutboxRow): Promise<void> {
-    const repository = this.dataSource.getRepository(OutboxEventOrmEntity);
-
     try {
       await this.publisher.publish(this.envelopeFromRow(row));
-      await repository.update(row.id, {
-        status: OutboxEventStatus.Published,
-        publishedAt: new Date(),
-        lastError: null,
-      });
+      await this.db
+        .update(outboxEventsTable)
+        .set({
+          status: OutboxEventStatus.Published,
+          publishedAt: new Date(),
+          lastError: null,
+          updatedAt: new Date(),
+        })
+        .where(eq(outboxEventsTable.id, row.id));
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
       const maxAttempts = this.integerEnv(EVENT_BACKBONE_ENV.relayMaxAttempts, 10);
@@ -949,11 +957,15 @@ export class OutboxRelayService {
         row.attempts >= maxAttempts ? OutboxEventStatus.Failed : OutboxEventStatus.Pending;
       const delayMs = this.integerEnv(EVENT_BACKBONE_ENV.relayRetryBaseMs, 30000) * row.attempts;
 
-      await repository.update(row.id, {
-        status: nextStatus,
-        availableAt: new Date(Date.now() + delayMs),
-        lastError: message,
-      });
+      await this.db
+        .update(outboxEventsTable)
+        .set({
+          status: nextStatus,
+          availableAt: new Date(Date.now() + delayMs),
+          lastError: message,
+          updatedAt: new Date(),
+        })
+        .where(eq(outboxEventsTable.id, row.id));
 
       this.logger.warn("Failed to publish outbox event " + row.id + ": " + message);
     }
@@ -1002,7 +1014,6 @@ export class OutboxRelayService {
   const moduleContent = `import { Module } from "@nestjs/common";
 import { ConfigModule, ConfigService } from "@nestjs/config";
 import { ScheduleModule } from "@nestjs/schedule";
-import { TypeOrmModule } from "@nestjs/typeorm";
 import { BusinessReferenceModule } from "../business-references";
 import {
   EVENT_BACKBONE_ENV,
@@ -1012,23 +1023,18 @@ import {
 import { EventStoreService } from "./event-store.service";
 import { OutboxRelayService } from "./outbox-relay.service";
 import { OutboxService } from "./outbox.service";
-import { EventStoreOrmEntity } from "./entities/event-store.orm-entity";
-import { OutboxEventOrmEntity } from "./entities/outbox-event.orm-entity";
-import { ProjectionCheckpointOrmEntity } from "./entities/projection-checkpoint.orm-entity";
 import { NoopEventPublisher } from "./publishers/noop-event.publisher";
 import { PulsarEventPublisher } from "./publishers/pulsar-event.publisher";
 import { RelayHttpPublisher } from "./publishers/relay-http.publisher";
 
+// Drizzle needs no TypeOrmModule.forFeature-style registration here — the
+// global DRIZZLE provider (from DatabaseModule) is injected directly into
+// EventStoreService, OutboxService, and OutboxRelayService above.
 @Module({
   imports: [
     ConfigModule,
     BusinessReferenceModule,
     ScheduleModule.forRoot(),
-    TypeOrmModule.forFeature([
-      EventStoreOrmEntity,
-      OutboxEventOrmEntity,
-      ProjectionCheckpointOrmEntity,
-    ]),
   ],
   providers: [
     EventStoreService,
@@ -1075,45 +1081,27 @@ export * from "./entities/projection-checkpoint.orm-entity";
 
   await writeFile(path.join(eventBackbonePath, 'index.ts'), indexContent);
 
-  const timestamp = Date.now();
-  const migrationName = `CreateEventBackboneTables${timestamp}`;
-  const migrationContent = `import { MigrationInterface, QueryRunner } from "typeorm";
-
-export class ${migrationName} implements MigrationInterface {
-  name = "${migrationName}";
-
-  public async up(queryRunner: QueryRunner): Promise<void> {
-    await queryRunner.query('CREATE TABLE IF NOT EXISTS "event_store" ("global_seq" bigserial PRIMARY KEY, "event_id" uuid NOT NULL, "reference" varchar(96), "stream_id" varchar(160) NOT NULL, "version" int NOT NULL, "type" varchar(160) NOT NULL, "aggregate_type" varchar(96) NOT NULL, "aggregate_id" varchar(96) NOT NULL, "payload" jsonb NOT NULL, "metadata" jsonb NOT NULL DEFAULT \\'{}\\'::jsonb, "occurred_at" timestamptz NOT NULL, "created_at" timestamptz NOT NULL DEFAULT now(), CONSTRAINT "uq_event_store_stream_version" UNIQUE ("stream_id", "version"))');
-    await queryRunner.query('CREATE INDEX IF NOT EXISTS "idx_event_store_stream" ON "event_store" ("stream_id")');
-    await queryRunner.query('CREATE UNIQUE INDEX IF NOT EXISTS "idx_event_store_event_id" ON "event_store" ("event_id")');
-    await queryRunner.query('CREATE INDEX IF NOT EXISTS "idx_event_store_type" ON "event_store" ("type")');
-    await queryRunner.query('CREATE INDEX IF NOT EXISTS "idx_event_store_aggregate" ON "event_store" ("aggregate_type", "aggregate_id")');
-
-    await queryRunner.query('CREATE TABLE IF NOT EXISTS "outbox_events" ("id" uuid PRIMARY KEY, "reference" varchar(96), "event_type" varchar(160) NOT NULL, "source" varchar(160) NOT NULL, "aggregate_type" varchar(96) NOT NULL, "aggregate_id" varchar(96) NOT NULL, "stream_id" varchar(160) NOT NULL, "version" int NOT NULL, "subject" varchar(160), "payload" jsonb NOT NULL, "metadata" jsonb NOT NULL DEFAULT \\'{}\\'::jsonb, "status" varchar(20) NOT NULL DEFAULT \\'PENDING\\', "attempts" int NOT NULL DEFAULT 0, "available_at" timestamptz NOT NULL, "occurred_at" timestamptz NOT NULL, "published_at" timestamptz, "last_error" text, "created_at" timestamptz NOT NULL DEFAULT now(), "updated_at" timestamptz NOT NULL DEFAULT now(), CONSTRAINT "chk_outbox_events_status" CHECK ("status" IN (\\'PENDING\\', \\'PUBLISHING\\', \\'PUBLISHED\\', \\'FAILED\\')))');
-    await queryRunner.query('CREATE INDEX IF NOT EXISTS "idx_outbox_events_status_available" ON "outbox_events" ("status", "available_at")');
-    await queryRunner.query('CREATE INDEX IF NOT EXISTS "idx_outbox_events_aggregate" ON "outbox_events" ("aggregate_type", "aggregate_id")');
-    await queryRunner.query('CREATE UNIQUE INDEX IF NOT EXISTS "idx_outbox_events_reference" ON "outbox_events" ("reference") WHERE "reference" IS NOT NULL');
-
-    await queryRunner.query('CREATE TABLE IF NOT EXISTS "projection_checkpoints" ("projection" varchar(120) PRIMARY KEY, "last_seq" bigint NOT NULL DEFAULT 0, "updated_at" timestamptz NOT NULL DEFAULT now())');
-  }
-
-  public async down(queryRunner: QueryRunner): Promise<void> {
-    await queryRunner.query('DROP TABLE IF EXISTS "projection_checkpoints"');
-    await queryRunner.query('DROP TABLE IF EXISTS "outbox_events"');
-    await queryRunner.query('DROP TABLE IF EXISTS "event_store"');
-  }
-}
-`;
-
-  await writeFile(
-    path.join(migrationsPath, `${timestamp}-CreateEventBackboneTables.ts`),
-    migrationContent,
-  );
-
+  // Drizzle projects don't get a hand-written migration class: the pgTable
+  // schema files under entities/ are already the source of truth, and
+  // `drizzle-kit generate` diffs them into real SQL migrations. Make sure
+  // they're covered by the project's drizzle.config.ts schema glob, then
+  // print the same generate/migrate guidance the core scaffolder uses.
   console.log(chalk.green('  ✓ Business reference sidecar recipe installed'));
   console.log(chalk.green('  ✓ Joi environment schema fragment'));
   console.log(chalk.green('  ✓ Postgres event store entities and service'));
   console.log(chalk.green('  ✓ Transactional outbox service and relay'));
   console.log(chalk.green('  ✓ Relay HTTP and Pulsar publishers with transport selection'));
-  console.log(chalk.green('  ✓ TypeORM migration for event backbone tables'));
+  console.log(
+    chalk.green('  ✓ Drizzle schema for event_store, outbox_events, projection_checkpoints'),
+  );
+  console.log(
+    chalk.yellow(
+      '  ⚠ Make sure the schema glob in drizzle.config.ts covers src/shared/event-backbone/entities/*.orm-entity.ts',
+    ),
+  );
+  console.log(
+    chalk.cyan(
+      '  → Run npx drizzle-kit generate then npx drizzle-kit migrate to create the SQL migration for these tables.',
+    ),
+  );
 }

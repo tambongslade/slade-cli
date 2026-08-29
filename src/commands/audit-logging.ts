@@ -14,7 +14,7 @@ export interface AuditLoggingOptions {
 
 export async function setupAuditLogging(
   basePath: string,
-  options: AuditLoggingOptions = {}
+  options: AuditLoggingOptions = {},
 ): Promise<void> {
   console.log(chalk.bold.blue('\n📝 Setting up Audit Logging Framework\n'));
 
@@ -59,11 +59,9 @@ export async function setupAuditLogging(
 
 function generateAuditModule(): string {
   return `import { Module, Global, DynamicModule } from '@nestjs/common';
-import { TypeOrmModule } from '@nestjs/typeorm';
 import { APP_INTERCEPTOR } from '@nestjs/core';
 import { AuditService } from './audit.service';
 import { AuditInterceptor } from './audit.interceptor';
-import { AuditLog } from './audit-log.entity';
 import { ComplianceReporter } from './compliance.reporter';
 
 export interface AuditModuleOptions {
@@ -79,11 +77,13 @@ export interface AuditModuleOptions {
 @Module({})
 export class AuditModule {
   static forRoot(options: AuditModuleOptions): DynamicModule {
+    // AuditService and ComplianceReporter read/write audit logs through the
+    // globally-provided DRIZZLE connection (see
+    // src/shared/database/drizzle.provider.ts) — Drizzle has no
+    // module-scoped repository registration to wire up here.
     return {
       module: AuditModule,
-      imports: [
-        TypeOrmModule.forFeature([AuditLog]),
-      ],
+      imports: [],
       providers: [
         {
           provide: 'AUDIT_OPTIONS',
@@ -105,9 +105,9 @@ export class AuditModule {
 
 function generateAuditService(options: AuditLoggingOptions): string {
   return `import { Injectable, Inject, Logger } from '@nestjs/common';
-import { InjectRepository } from '@nestjs/typeorm';
-import { Repository, Between, Like } from 'typeorm';
-import { AuditLog, AuditAction, AuditCategory } from './audit-log.entity';
+import { and, eq, gte, lte, lt, desc, sql } from 'drizzle-orm';
+import { DRIZZLE, DrizzleDb } from '@shared/database/drizzle.provider';
+import { auditLogsTable, AuditLog, AuditAction, AuditCategory } from './audit-log.entity';
 
 export interface AuditEntry {
   action: AuditAction;
@@ -140,8 +140,7 @@ export class AuditService {
   private readonly logger = new Logger(AuditService.name);
 
   constructor(
-    @InjectRepository(AuditLog)
-    private readonly auditRepository: Repository<AuditLog>,
+    @Inject(DRIZZLE) private readonly db: DrizzleDb,
     @Inject('AUDIT_OPTIONS') private readonly options: any,
   ) {}
 
@@ -149,17 +148,19 @@ export class AuditService {
    * Log an audit entry
    */
   async log(entry: AuditEntry): Promise<AuditLog> {
-    const auditLog = this.auditRepository.create({
-      ...entry,
-      oldValue: this.sanitize(entry.oldValue),
-      newValue: this.sanitize(entry.newValue),
-      timestamp: new Date(),
-    });
+    const [row] = await this.db
+      .insert(auditLogsTable)
+      .values({
+        ...entry,
+        oldValue: this.sanitize(entry.oldValue),
+        newValue: this.sanitize(entry.newValue),
+        timestamp: new Date(),
+      })
+      .returning();
 
-    const saved = await this.auditRepository.save(auditLog);
     this.logger.debug(\`Audit log created: \${entry.action} on \${entry.resourceType}\`);
 
-    return saved;
+    return row;
   }
 
   /**
@@ -281,26 +282,34 @@ export class AuditService {
       ...filters
     } = query;
 
-    const where: any = {};
+    const conditions = [];
 
-    if (filters.userId) where.userId = filters.userId;
-    if (filters.action) where.action = filters.action;
-    if (filters.category) where.category = filters.category;
-    if (filters.resourceType) where.resourceType = filters.resourceType;
-    if (filters.resourceId) where.resourceId = filters.resourceId;
-
+    if (filters.userId) conditions.push(eq(auditLogsTable.userId, filters.userId));
+    if (filters.action) conditions.push(eq(auditLogsTable.action, filters.action));
+    if (filters.category) conditions.push(eq(auditLogsTable.category, filters.category));
+    if (filters.resourceType) conditions.push(eq(auditLogsTable.resourceType, filters.resourceType));
+    if (filters.resourceId) conditions.push(eq(auditLogsTable.resourceId, filters.resourceId));
     if (startDate && endDate) {
-      where.timestamp = Between(startDate, endDate);
+      conditions.push(gte(auditLogsTable.timestamp, startDate), lte(auditLogsTable.timestamp, endDate));
     }
 
-    const [items, total] = await this.auditRepository.findAndCount({
-      where,
-      order: { timestamp: 'DESC' },
-      skip: (page - 1) * pageSize,
-      take: pageSize,
-    });
+    const whereClause = and(...conditions);
 
-    return { items, total };
+    const [items, [countResult]] = await Promise.all([
+      this.db
+        .select()
+        .from(auditLogsTable)
+        .where(whereClause)
+        .orderBy(desc(auditLogsTable.timestamp))
+        .limit(pageSize)
+        .offset((page - 1) * pageSize),
+      this.db
+        .select({ count: sql<number>\`count(*)::int\` })
+        .from(auditLogsTable)
+        .where(whereClause),
+    ]);
+
+    return { items, total: countResult?.count ?? 0 };
   }
 
   /**
@@ -310,10 +319,11 @@ export class AuditService {
     resourceType: string,
     resourceId: string,
   ): Promise<AuditLog[]> {
-    return this.auditRepository.find({
-      where: { resourceType, resourceId },
-      order: { timestamp: 'DESC' },
-    });
+    return this.db
+      .select()
+      .from(auditLogsTable)
+      .where(and(eq(auditLogsTable.resourceType, resourceType), eq(auditLogsTable.resourceId, resourceId)))
+      .orderBy(desc(auditLogsTable.timestamp));
   }
 
   /**
@@ -323,13 +333,11 @@ export class AuditService {
     const startDate = new Date();
     startDate.setDate(startDate.getDate() - days);
 
-    return this.auditRepository.find({
-      where: {
-        userId,
-        timestamp: Between(startDate, new Date()),
-      },
-      order: { timestamp: 'DESC' },
-    });
+    return this.db
+      .select()
+      .from(auditLogsTable)
+      .where(and(eq(auditLogsTable.userId, userId), gte(auditLogsTable.timestamp, startDate)))
+      .orderBy(desc(auditLogsTable.timestamp));
   }
 
   /**
@@ -468,15 +476,13 @@ export class AuditService {
    * Archive old audit logs
    */
   async archive(olderThan: Date): Promise<number> {
-    const result = await this.auditRepository
-      .createQueryBuilder()
-      .update()
+    const rows = await this.db
+      .update(auditLogsTable)
       .set({ archived: true })
-      .where('timestamp < :date', { date: olderThan })
-      .andWhere('archived = :archived', { archived: false })
-      .execute();
+      .where(and(lt(auditLogsTable.timestamp, olderThan), eq(auditLogsTable.archived, false)))
+      .returning({ id: auditLogsTable.id });
 
-    return result.affected || 0;
+    return rows.length;
   }
 
   /**
@@ -487,12 +493,12 @@ export class AuditService {
     const cutoffDate = new Date();
     cutoffDate.setDate(cutoffDate.getDate() - days);
 
-    const result = await this.auditRepository.delete({
-      timestamp: Between(new Date(0), cutoffDate),
-      archived: true,
-    });
+    const rows = await this.db
+      .delete(auditLogsTable)
+      .where(and(lte(auditLogsTable.timestamp, cutoffDate), eq(auditLogsTable.archived, true)))
+      .returning({ id: auditLogsTable.id });
 
-    return result.affected || 0;
+    return rows.length;
   }
 }
 `;
@@ -652,89 +658,92 @@ interface AuditMetadata {
 }
 
 function generateAuditEntity(): string {
-  return `import {
-  Entity,
-  PrimaryGeneratedColumn,
-  Column,
-  CreateDateColumn,
-  Index,
-} from 'typeorm';
+  return `import { pgTable, pgEnum, uuid, text, jsonb, timestamp, boolean, index } from 'drizzle-orm/pg-core';
 
-export enum AuditAction {
-  CREATE = 'CREATE',
-  READ = 'READ',
-  UPDATE = 'UPDATE',
-  DELETE = 'DELETE',
-  LOGIN = 'LOGIN',
-  LOGOUT = 'LOGOUT',
-  EXPORT = 'EXPORT',
-  IMPORT = 'IMPORT',
-  ERROR = 'ERROR',
-  OTHER = 'OTHER',
-}
+export const auditActionEnum = pgEnum('audit_action', [
+  'CREATE',
+  'READ',
+  'UPDATE',
+  'DELETE',
+  'LOGIN',
+  'LOGOUT',
+  'EXPORT',
+  'IMPORT',
+  'ERROR',
+  'OTHER',
+]);
 
-export enum AuditCategory {
-  AUTHENTICATION = 'AUTHENTICATION',
-  AUTHORIZATION = 'AUTHORIZATION',
-  DATA_CHANGE = 'DATA_CHANGE',
-  DATA_ACCESS = 'DATA_ACCESS',
-  CONFIGURATION = 'CONFIGURATION',
-  SECURITY = 'SECURITY',
-  API_CALL = 'API_CALL',
-  ERROR = 'ERROR',
-  COMPLIANCE = 'COMPLIANCE',
-}
+export const auditCategoryEnum = pgEnum('audit_category', [
+  'AUTHENTICATION',
+  'AUTHORIZATION',
+  'DATA_CHANGE',
+  'DATA_ACCESS',
+  'CONFIGURATION',
+  'SECURITY',
+  'API_CALL',
+  'ERROR',
+  'COMPLIANCE',
+]);
 
-@Entity('audit_logs')
-@Index(['userId', 'timestamp'])
-@Index(['resourceType', 'resourceId'])
-@Index(['action', 'timestamp'])
-@Index(['category', 'timestamp'])
-export class AuditLog {
-  @PrimaryGeneratedColumn('uuid')
-  id: string;
+export const auditLogsTable = pgTable(
+  'audit_logs',
+  {
+    id: uuid('id').defaultRandom().primaryKey(),
+    action: auditActionEnum('action').notNull(),
+    category: auditCategoryEnum('category').notNull(),
+    userId: text('user_id'),
+    resourceType: text('resource_type').notNull(),
+    resourceId: text('resource_id'),
+    description: text('description').notNull(),
+    oldValue: jsonb('old_value').$type<Record<string, any> | null>(),
+    newValue: jsonb('new_value').$type<Record<string, any> | null>(),
+    metadata: jsonb('metadata').$type<Record<string, any> | null>(),
+    ipAddress: text('ip_address'),
+    userAgent: text('user_agent'),
+    timestamp: timestamp('timestamp', { withTimezone: true }).notNull().defaultNow(),
+    archived: boolean('archived').notNull().default(false),
+  },
+  (table) => ({
+    userTimestampIdx: index('audit_logs_user_id_timestamp_idx').on(table.userId, table.timestamp),
+    resourceIdx: index('audit_logs_resource_type_resource_id_idx').on(table.resourceType, table.resourceId),
+    actionTimestampIdx: index('audit_logs_action_timestamp_idx').on(table.action, table.timestamp),
+    categoryTimestampIdx: index('audit_logs_category_timestamp_idx').on(table.category, table.timestamp),
+    timestampIdx: index('audit_logs_timestamp_idx').on(table.timestamp),
+  }),
+);
 
-  @Column({ type: 'enum', enum: AuditAction })
-  action: AuditAction;
+export type AuditLog = typeof auditLogsTable.$inferSelect;
+export type NewAuditLog = typeof auditLogsTable.$inferInsert;
 
-  @Column({ type: 'enum', enum: AuditCategory })
-  category: AuditCategory;
+// Ergonomic enum-like accessors (AuditAction.CREATE, etc.) for application code,
+// backed by the same string literals as the auditActionEnum/auditCategoryEnum
+// Postgres enums above.
+export const AuditAction = {
+  CREATE: 'CREATE',
+  READ: 'READ',
+  UPDATE: 'UPDATE',
+  DELETE: 'DELETE',
+  LOGIN: 'LOGIN',
+  LOGOUT: 'LOGOUT',
+  EXPORT: 'EXPORT',
+  IMPORT: 'IMPORT',
+  ERROR: 'ERROR',
+  OTHER: 'OTHER',
+} as const;
+export type AuditAction = (typeof AuditAction)[keyof typeof AuditAction];
 
-  @Column({ nullable: true })
-  @Index()
-  userId: string;
-
-  @Column()
-  resourceType: string;
-
-  @Column({ nullable: true })
-  resourceId: string;
-
-  @Column('text')
-  description: string;
-
-  @Column({ type: 'jsonb', nullable: true })
-  oldValue: any;
-
-  @Column({ type: 'jsonb', nullable: true })
-  newValue: any;
-
-  @Column({ type: 'jsonb', nullable: true })
-  metadata: Record<string, any>;
-
-  @Column({ nullable: true })
-  ipAddress: string;
-
-  @Column({ nullable: true })
-  userAgent: string;
-
-  @CreateDateColumn()
-  @Index()
-  timestamp: Date;
-
-  @Column({ default: false })
-  archived: boolean;
-}
+export const AuditCategory = {
+  AUTHENTICATION: 'AUTHENTICATION',
+  AUTHORIZATION: 'AUTHORIZATION',
+  DATA_CHANGE: 'DATA_CHANGE',
+  DATA_ACCESS: 'DATA_ACCESS',
+  CONFIGURATION: 'CONFIGURATION',
+  SECURITY: 'SECURITY',
+  API_CALL: 'API_CALL',
+  ERROR: 'ERROR',
+  COMPLIANCE: 'COMPLIANCE',
+} as const;
+export type AuditCategory = (typeof AuditCategory)[keyof typeof AuditCategory];
 `;
 }
 
@@ -819,10 +828,10 @@ export function SensitiveOperation(description: string) {
 }
 
 function generateComplianceReporter(): string {
-  return `import { Injectable, Logger } from '@nestjs/common';
-import { InjectRepository } from '@nestjs/typeorm';
-import { Repository, Between } from 'typeorm';
-import { AuditLog, AuditAction, AuditCategory } from './audit-log.entity';
+  return `import { Injectable, Inject, Logger } from '@nestjs/common';
+import { and, eq, gte, lte, desc } from 'drizzle-orm';
+import { DRIZZLE, DrizzleDb } from '@shared/database/drizzle.provider';
+import { auditLogsTable, AuditLog, AuditAction, AuditCategory } from './audit-log.entity';
 
 export interface ComplianceReport {
   reportId: string;
@@ -876,20 +885,16 @@ export interface AnomalyReport {
 export class ComplianceReporter {
   private readonly logger = new Logger(ComplianceReporter.name);
 
-  constructor(
-    @InjectRepository(AuditLog)
-    private readonly auditRepository: Repository<AuditLog>,
-  ) {}
+  constructor(@Inject(DRIZZLE) private readonly db: DrizzleDb) {}
 
   /**
    * Generate compliance report for a period
    */
   async generateReport(startDate: Date, endDate: Date): Promise<ComplianceReport> {
-    const logs = await this.auditRepository.find({
-      where: {
-        timestamp: Between(startDate, endDate),
-      },
-    });
+    const logs = await this.db
+      .select()
+      .from(auditLogsTable)
+      .where(and(gte(auditLogsTable.timestamp, startDate), lte(auditLogsTable.timestamp, endDate)));
 
     const reportId = \`compliance_\${Date.now()}\`;
 
@@ -909,10 +914,11 @@ export class ComplianceReporter {
    * Generate GDPR data subject report
    */
   async generateGDPRReport(userId: string): Promise<any> {
-    const logs = await this.auditRepository.find({
-      where: { userId },
-      order: { timestamp: 'DESC' },
-    });
+    const logs = await this.db
+      .select()
+      .from(auditLogsTable)
+      .where(eq(auditLogsTable.userId, userId))
+      .orderBy(desc(auditLogsTable.timestamp));
 
     const dataAccessed = new Set<string>();
     const dataModified = new Set<string>();
@@ -921,7 +927,7 @@ export class ComplianceReporter {
       if (log.action === AuditAction.READ) {
         dataAccessed.add(\`\${log.resourceType}:\${log.resourceId}\`);
       }
-      if ([AuditAction.CREATE, AuditAction.UPDATE, AuditAction.DELETE].includes(log.action)) {
+      if (([AuditAction.CREATE, AuditAction.UPDATE, AuditAction.DELETE] as AuditAction[]).includes(log.action)) {
         dataModified.add(\`\${log.resourceType}:\${log.resourceId}\`);
       }
     }

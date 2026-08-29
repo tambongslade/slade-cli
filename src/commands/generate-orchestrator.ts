@@ -16,7 +16,7 @@ export interface OrchestratorOptions {
 export async function generateOrchestrator(
   name: string,
   basePath: string,
-  options: OrchestratorOptions = {}
+  options: OrchestratorOptions = {},
 ): Promise<void> {
   console.log(chalk.bold.blue('\n🎭 Generating Use Case Orchestrator\n'));
 
@@ -53,18 +53,23 @@ function generateCommandOrchestrator(name: string): string {
 
   return `import { Injectable, Logger } from '@nestjs/common';
 import { EventEmitter2 } from '@nestjs/event-emitter';
-import { DataSource } from 'typeorm';
+import { UnitOfWork } from '@shared/repositories/unit-of-work';
+import { DrizzleDb } from '@shared/database/drizzle.provider';
 
 /**
  * ${className} Command Orchestrator
- * Handles command execution with transaction management and event publishing
+ * Handles command execution with transaction management and event publishing.
+ * Transactions are delegated to the Drizzle-backed UnitOfWork
+ * (see \`src/shared/repositories/unit-of-work.ts\`) which wraps
+ * \`db.transaction(async (tx) => ...)\` - throwing inside \`execute\` rolls
+ * the transaction back, returning normally commits it.
  */
 @Injectable()
 export class ${className}Orchestrator {
   private readonly logger = new Logger(${className}Orchestrator.name);
 
   constructor(
-    private readonly dataSource: DataSource,
+    private readonly unitOfWork: UnitOfWork,
     private readonly eventEmitter: EventEmitter2,
   ) {}
 
@@ -89,20 +94,13 @@ export class ${className}Orchestrator {
       };
     }
 
-    // Execute in transaction
-    const queryRunner = this.dataSource.createQueryRunner();
-    await queryRunner.connect();
-    await queryRunner.startTransaction();
-
     try {
       // Pre-execution hooks
       await this.beforeExecute(command, correlationId);
 
-      // Execute command logic
-      const result = await this.executeCommand(command, queryRunner);
-
-      // Commit transaction
-      await queryRunner.commitTransaction();
+      // Execute command logic inside a Drizzle transaction. Throwing here
+      // rolls the transaction back automatically.
+      const result = await this.unitOfWork.run((tx) => this.executeCommand(command, tx));
 
       // Post-execution hooks
       await this.afterExecute(command, result, correlationId);
@@ -117,8 +115,6 @@ export class ${className}Orchestrator {
       };
 
     } catch (error) {
-      await queryRunner.rollbackTransaction();
-
       this.logger.error(\`Command failed [\${correlationId}]: \${(error as Error).message}\`);
 
       // Publish failure event
@@ -137,9 +133,6 @@ export class ${className}Orchestrator {
         },
         correlationId,
       };
-
-    } finally {
-      await queryRunner.release();
     }
   }
 
@@ -158,9 +151,9 @@ export class ${className}Orchestrator {
 
   private async executeCommand(
     command: ${className}Command,
-    queryRunner: any,
+    tx: DrizzleDb,
   ): Promise<ExecutionResult> {
-    // Implement command execution logic
+    // Implement command execution logic using the transactional \`tx\` client
     return {
       data: {},
       events: [],
@@ -675,7 +668,7 @@ interface StepFailedEvent {
  */
 export async function setupOrchestratorInfrastructure(
   basePath: string,
-  options: OrchestratorOptions = {}
+  options: OrchestratorOptions = {},
 ): Promise<void> {
   console.log(chalk.bold.blue('\n🎭 Setting up Orchestrator Infrastructure\n'));
 
@@ -846,22 +839,16 @@ export class ValidationStep<TContext extends { input: any; errors?: string[] }> 
 }
 
 export class TransactionStep<TContext> implements PipelineStep<TContext> {
-  constructor(private readonly dataSource: any) {}
+  /**
+   * Accepts anything shaped like the Drizzle-backed UnitOfWork
+   * (see \`src/shared/repositories/unit-of-work.ts\`): \`run(work) => Promise<T>\`.
+   * \`run\` wraps \`db.transaction(async (tx) => ...)\`, so throwing inside
+   * \`next()\` rolls the transaction back and returning commits it.
+   */
+  constructor(private readonly unitOfWork: { run<T>(work: () => Promise<T>): Promise<T> }) {}
 
   async execute(context: TContext, next: () => Promise<void>): Promise<void> {
-    const queryRunner = this.dataSource.createQueryRunner();
-    await queryRunner.connect();
-    await queryRunner.startTransaction();
-
-    try {
-      await next();
-      await queryRunner.commitTransaction();
-    } catch (error) {
-      await queryRunner.rollbackTransaction();
-      throw error;
-    } finally {
-      await queryRunner.release();
-    }
+    await this.unitOfWork.run(() => next());
   }
 }
 `;
@@ -877,6 +864,6 @@ function toKebabCase(str: string): string {
 
 function toPascalCase(str: string): string {
   return str
-    .replace(/[-_\s]+(.)?/g, (_, c) => c ? c.toUpperCase() : '')
-    .replace(/^(.)/, c => c.toUpperCase());
+    .replace(/[-_\s]+(.)?/g, (_, c) => (c ? c.toUpperCase() : ''))
+    .replace(/^(.)/, (c) => c.toUpperCase());
 }

@@ -5,14 +5,14 @@ import { toPascalCase, toCamelCase, toKebabCase } from '../utils/naming.utils';
 
 export interface DbOptimizationOptions {
   module?: string;
-  orm?: 'typeorm' | 'prisma' | 'mikro-orm';
+  orm?: 'drizzle' | 'prisma';
   includeDataLoader?: boolean;
   includeQueryAnalyzer?: boolean;
 }
 
 export async function setupDbOptimization(
   basePath: string,
-  options: DbOptimizationOptions = {}
+  options: DbOptimizationOptions = {},
 ): Promise<void> {
   console.log(chalk.bold.blue('\n🗄️ Setting up Database Optimization\n'));
 
@@ -20,7 +20,7 @@ export async function setupDbOptimization(
   const pascalName = toPascalCase(moduleName);
   const camelName = toCamelCase(moduleName);
   const kebabName = toKebabCase(moduleName);
-  const orm = options.orm || 'typeorm';
+  const orm = options.orm || 'drizzle';
   const includeDataLoader = options.includeDataLoader !== false;
   const includeQueryAnalyzer = options.includeQueryAnalyzer !== false;
 
@@ -190,8 +190,8 @@ export class ${pascalName}DataLoader {
 
   // Query Analyzer
   if (includeQueryAnalyzer) {
-    const queryAnalyzerContent = `import { Injectable, Logger } from '@nestjs/common';
-${orm === 'typeorm' ? "import { DataSource, QueryRunner } from 'typeorm';" : ''}
+    const queryAnalyzerContent = `import { Injectable, Inject, Logger } from '@nestjs/common';
+${orm === 'drizzle' ? "import { sql } from 'drizzle-orm';\nimport { DRIZZLE, DrizzleDb } from '@shared/database/drizzle.provider';" : ''}
 
 interface QueryMetrics {
   query: string;
@@ -202,12 +202,12 @@ interface QueryMetrics {
 }
 
 interface ExplainResult {
-  type: string;
-  possibleKeys?: string[];
-  key?: string;
-  rows?: number;
-  filtered?: number;
-  extra?: string;
+  nodeType: string;
+  relationName?: string;
+  indexName?: string;
+  planRows?: number;
+  actualTotalTime?: number;
+  filter?: string;
 }
 
 interface SlowQueryReport {
@@ -236,7 +236,7 @@ export class QueryAnalyzerService {
   private readonly maxStoredQueries: number;
 
   constructor(
-${orm === 'typeorm' ? '    private readonly dataSource: DataSource,' : ''}
+${orm === 'drizzle' ? '    @Inject(DRIZZLE) private readonly db: DrizzleDb,' : ''}
   ) {
     this.slowQueryThreshold = parseInt(process.env.SLOW_QUERY_THRESHOLD_MS || '100', 10);
     this.maxStoredQueries = parseInt(process.env.MAX_STORED_QUERIES || '1000', 10);
@@ -363,30 +363,43 @@ ${orm === 'typeorm' ? '    private readonly dataSource: DataSource,' : ''}
 
     return suggestions.length > 0 ? suggestions.join('; ') : 'Profile query execution plan for detailed analysis';
   }
-${orm === 'typeorm' ? `
+${
+  orm === 'drizzle'
+    ? `
   /**
-   * Analyze query with EXPLAIN
+   * Analyze query with Postgres's EXPLAIN (FORMAT JSON).
+   *
+   * NOTE: the query string is inlined into the EXPLAIN statement via
+   * sql.raw() because EXPLAIN does not accept its target statement as a
+   * bound parameter. Only pass trusted, already-built SQL here (e.g. the
+   * normalized queries this service records) — never raw user input.
    */
   async explainQuery(query: string): Promise<ExplainResult | null> {
     try {
-      const result = await this.dataSource.query(\`EXPLAIN \${query}\`);
-      if (result && result.length > 0) {
-        return {
-          type: result[0].type || result[0].select_type,
-          possibleKeys: result[0].possible_keys?.split(','),
-          key: result[0].key,
-          rows: result[0].rows,
-          filtered: result[0].filtered,
-          extra: result[0].Extra,
-        };
+      const result = await this.db.execute(sql.raw(\`EXPLAIN (FORMAT JSON) \${query}\`));
+      const rows = result as unknown as Array<{ 'QUERY PLAN': [{ Plan: Record<string, any> }] }>;
+      const plan = rows[0]?.['QUERY PLAN']?.[0]?.Plan;
+
+      if (!plan) {
+        return null;
       }
-      return null;
+
+      return {
+        nodeType: plan['Node Type'],
+        relationName: plan['Relation Name'],
+        indexName: plan['Index Name'],
+        planRows: plan['Plan Rows'],
+        actualTotalTime: plan['Actual Total Time'],
+        filter: plan['Filter'] || plan['Index Cond'],
+      };
     } catch (error) {
       this.logger.error(\`Failed to explain query: \${error}\`);
       return null;
     }
   }
-` : ''}
+`
+    : ''
+}
   /**
    * Suggest indexes based on query patterns
    */
@@ -528,6 +541,14 @@ export class QueryTrackingInterceptor implements NestInterceptor {
   // Connection pool optimizer
   const connectionPoolContent = `import { Injectable, Logger, OnModuleInit } from '@nestjs/common';
 
+/**
+ * NOTE: the \`postgres\` (postgres-js) driver used by this project's Drizzle
+ * connection (see src/shared/database/drizzle.provider.ts) does not expose a
+ * built-in pool-statistics API (no totalCount/idleCount/waitingCount like
+ * node-postgres's Pool). This optimizer therefore tracks metrics manually —
+ * call recordAcquireTime() / updateMetrics() from your own connection
+ * lifecycle code (e.g. around query execution) to feed it real numbers.
+ */
 interface PoolConfig {
   min: number;
   max: number;
