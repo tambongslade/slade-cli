@@ -7,13 +7,13 @@
     "slade": "dist/index.js"
   },
   "scripts": {
-    "build": "tsc -p tsconfig.build.json && cp -r src/templates dist/ && chmod +x dist/index.js",
+    "build": "tsc -p tsconfig.build.json && shx cp -r src/templates dist/ && shx chmod +x dist/index.js",
     "build:watch": "tsc --watch",
     "dev": "ts-node src/index.ts",
     "link": "npm run build && npm link",
-    "unlink": "npm unlink -g nestjs-ddd-cli",
+    "unlink": "npm unlink -g slade-cli",
     "prepublishOnly": "npm run clean && npm run build",
-    "clean": "rm -rf dist coverage",
+    "clean": "shx rm -rf dist coverage",
     "pretest": "npm run build",
     "test": "jest --runInBand",
     "test:watch": "jest --watch",
@@ -42,15 +42,15 @@
     "drizzle",
     "postgres"
   ],
-  "author": "Ben Ouattara ben.ouattara@outlook.com",
+  "author": "tambongslade",
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/eshe-huli/nestjs-ddd-cli.git"
+    "url": "git+https://github.com/tambongslade/slade-cli.git"
   },
   "bugs": {
-    "url": "https://github.com/eshe-huli/nestjs-ddd-cli/issues"
+    "url": "https://github.com/tambongslade/slade-cli/issues"
   },
-  "homepage": "https://github.com/eshe-huli/nestjs-ddd-cli#readme",
+  "homepage": "https://github.com/tambongslade/slade-cli#readme",
   "engines": {
     "node": ">=18.0.0"
   },
@@ -101,6 +101,7 @@
     "lint-staged": "^15.5.2",
     "prettier": "^3.6.2",
     "semantic-release": "^24.2.7",
+    "shx": "^0.4.0",
     "ts-jest": "^29.4.1",
     "ts-node": "^10.9.2",
     "typescript": "^5.3.3"
