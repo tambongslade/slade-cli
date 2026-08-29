@@ -1,6 +1,6 @@
 {
   "name": "slade-cli",
-  "version": "3.2.2",
+  "version": "3.2.3",
   "description": "CLI for generating NestJS DDD boilerplate code (Drizzle + PostgreSQL)",
   "main": "dist/index.js",
   "bin": {
