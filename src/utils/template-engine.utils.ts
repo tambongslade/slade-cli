@@ -447,21 +447,22 @@ function fieldTypeToTs(type: string): string {
   return map[type] || 'any';
 }
 
-function fieldTypeToDb(type: string, orm: string = 'typeorm'): string {
-  const typeormMap: Record<string, string> = {
-    string: 'varchar',
-    number: 'int',
+function fieldTypeToDb(type: string, orm: string = 'drizzle'): string {
+  // Drizzle pg-core column builder function names
+  const drizzleMap: Record<string, string> = {
+    string: 'text',
+    number: 'integer',
     boolean: 'boolean',
     date: 'date',
     datetime: 'timestamp',
     text: 'text',
     json: 'jsonb',
     uuid: 'uuid',
-    email: 'varchar',
-    url: 'varchar',
-    decimal: 'decimal',
-    float: 'float',
-    integer: 'int',
+    email: 'text',
+    url: 'text',
+    decimal: 'numeric',
+    float: 'doublePrecision',
+    integer: 'integer',
     bigint: 'bigint',
   };
 
@@ -482,7 +483,7 @@ function fieldTypeToDb(type: string, orm: string = 'typeorm'): string {
     bigint: 'BigInt',
   };
 
-  return orm === 'prisma' ? prismaMap[type] || 'String' : typeormMap[type] || 'varchar';
+  return orm === 'prisma' ? prismaMap[type] || 'String' : drizzleMap[type] || 'text';
 }
 
 function generateValidatorDecorators(field: any): string {

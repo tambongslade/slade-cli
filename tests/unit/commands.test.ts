@@ -252,7 +252,7 @@ describe('Command Generators', () => {
       ).toBe(false);
 
       const plannedFiles = getDryRunFiles().map((change) =>
-        path.relative(testDir, change.filePath),
+        path.relative(testDir, change.filePath).split(path.sep).join('/'),
       );
       expect(plannedFiles).toContain(
         'src/modules/inventory/application/dto/requests/update-product.dto.ts',
@@ -314,7 +314,7 @@ describe('Command Generators', () => {
 
       expect(await fs.pathExists(path.join(testDir, 'src'))).toBe(false);
       const plannedFiles = getDryRunFiles().map((change) =>
-        path.relative(testDir, change.filePath),
+        path.relative(testDir, change.filePath).split(path.sep).join('/'),
       );
       expect(plannedFiles).toContain(
         'src/modules/certifications/application/controllers/certification.controller.ts',

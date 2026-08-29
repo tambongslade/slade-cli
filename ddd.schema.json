@@ -6,15 +6,15 @@
   "properties": {
     "orm": {
       "type": "string",
-      "enum": ["typeorm", "prisma", "mikro-orm"],
-      "default": "typeorm",
+      "enum": ["drizzle", "prisma"],
+      "default": "drizzle",
       "description": "ORM to use for database operations"
     },
     "database": {
       "type": "string",
-      "enum": ["postgres", "mysql", "mongodb", "sqlite"],
+      "enum": ["postgres"],
       "default": "postgres",
-      "description": "Database type"
+      "description": "Database type (Postgres only)"
     },
     "naming": {
       "type": "object",

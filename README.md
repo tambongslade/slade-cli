@@ -1,6 +1,6 @@
-# NestJS DDD CLI
+# Slade CLI
 
-**An opinionated CLI for pragmatic Domain-Driven Design with NestJS**
+**An opinionated CLI for pragmatic Domain-Driven Design with NestJS, Drizzle, and PostgreSQL**
 
 Stop writing boilerplate. Start building business logic.
 
@@ -19,26 +19,26 @@ Generate production-ready, security-hardened NestJS code following proven DDD/CQ
 ## Installation
 
 ```bash
-npm install -g nestjs-ddd-cli
+npm install -g slade-cli
 ```
 
 ## Quick Start
 
 ```bash
 # Initialize a new project
-ddd init my-project
+slade init my-project
 
 # Generate a financial-safe aggregate without a generic DELETE operation
-ddd scaffold Invoice -m billing --fields "amount:money tenantId:uuid:serverOwned" --no-delete
+slade scaffold Invoice -m billing --fields "amount:money tenantId:uuid:serverOwned" --no-delete
 
 # Apply authentication recipe
-ddd recipe auth-jwt --install-deps
+slade recipe auth-jwt --install-deps
 
 # Set up security patterns
-ddd security-patterns
+slade security-patterns
 
 # Add observability
-ddd observability
+slade observability
 ```
 
 ## Commands
@@ -47,44 +47,44 @@ ddd observability
 
 | Command | Description |
 |---------|-------------|
-| `ddd init <name>` | Initialize new NestJS project with DDD structure |
-| `ddd scaffold <entity> -m <module>` | Generate a complete aggregate stack |
-| `ddd generate <type> <name> -m <module>` | Generate individual components |
-| `ddd recipe [name]` | Apply common patterns (auth, caching, etc.) |
-| `ddd shared` | Generate shared utilities and base classes |
+| `slade init <name>` | Initialize new NestJS project with DDD structure |
+| `slade scaffold <entity> -m <module>` | Generate a complete aggregate stack |
+| `slade generate <type> <name> -m <module>` | Generate individual components |
+| `slade recipe [name]` | Apply common patterns (auth, caching, etc.) |
+| `slade shared` | Generate shared utilities and base classes |
 
 ```bash
-ddd generate dto Product -m inventory --kind create
+slade generate dto Product -m inventory --kind create
 ```
 
 ### Enterprise Commands
 
 | Command | Description |
 |---------|-------------|
-| `ddd security-patterns` | RBAC, encryption, OWASP middleware, JWT security |
-| `ddd circuit-breaker` | Resilience patterns (retry, timeout, fallback) |
-| `ddd observability` | OpenTelemetry distributed tracing |
-| `ddd feature-flags` | Feature flags with A/B testing support |
-| `ddd caching-advanced` | Multi-layer caching strategies |
-| `ddd db-optimization` | DataLoader, query analyzer, connection pooling |
-| `ddd database-seeding` | Seed runner with fixture factories |
-| `ddd health-probes` | Kubernetes liveness/readiness/startup probes |
-| `ddd metrics-prometheus` | Prometheus metrics with Grafana dashboard |
-| `ddd graphql-subscriptions` | Real-time GraphQL with PubSub |
+| `slade security-patterns` | RBAC, encryption, OWASP middleware, JWT security |
+| `slade circuit-breaker` | Resilience patterns (retry, timeout, fallback) |
+| `slade observability` | OpenTelemetry distributed tracing |
+| `slade feature-flags` | Feature flags with A/B testing support |
+| `slade caching-advanced` | Multi-layer caching strategies |
+| `slade db-optimization` | DataLoader, query analyzer, connection pooling |
+| `slade database-seeding` | Seed runner with fixture factories |
+| `slade health-probes` | Kubernetes liveness/readiness/startup probes |
+| `slade metrics-prometheus` | Prometheus metrics with Grafana dashboard |
+| `slade graphql-subscriptions` | Real-time GraphQL with PubSub |
 
 ### Utility Commands
 
 | Command | Description |
 |---------|-------------|
-| `ddd update` | Update CLI to latest version |
-| `ddd update-deps` | Update project dependencies |
+| `slade update` | Update CLI to latest version |
+| `slade update-deps` | Update project dependencies |
 
 ## Field-Aware Generation
 
 Generate complete typed entities, DTOs, and migrations:
 
 ```bash
-ddd scaffold Product -m inventory --fields "name:string price:money:optional sku:string:unique"
+slade scaffold Product -m inventory --fields "name:string price:money:optional sku:string:unique"
 ```
 
 **Field Format:** `name:type:modifier1:modifier2`
@@ -99,15 +99,16 @@ ddd scaffold Product -m inventory --fields "name:string price:money:optional sku
 | `uuid`, `json`, `enum` | |
 
 Use `money` for financial values that must not pass through JavaScript floating-point
-numbers. It generates `string` in domain, TypeORM, request, and response types,
-decimal-string validation and OpenAPI metadata, plus `decimal`/Prisma `Decimal`
-storage. Existing `decimal` fields remain TypeScript `number` for compatibility.
+numbers. It generates `string` in domain, Drizzle, request, and response types,
+decimal-string validation and OpenAPI metadata, plus a Drizzle `numeric(..., { mode: "string" })`
+column (Prisma: `Decimal`). Existing `decimal` fields remain TypeScript `number` for
+compatibility, backed by Drizzle's `numeric(..., { mode: "number" })`.
 
 Use `serverOwned` for fields populated from trusted application context rather than
 the request body:
 
 ```bash
-ddd scaffold Invoice -m billing \
+slade scaffold Invoice -m billing \
   --fields "amount:money tenantId:uuid:serverOwned bookId:uuid:serverOwned"
 ```
 
@@ -120,17 +121,17 @@ context.
 For an aggregate with no generic deletion capability:
 
 ```bash
-ddd scaffold LedgerEntry -m ledger --fields "amount:money" --no-delete
+slade scaffold LedgerEntry -m ledger --fields "amount:money" --no-delete
 # Equivalent project-wide default: features.delete = false in .dddrc.json
 ```
 
 **Relations:**
 ```bash
 # ManyToOne relation
-ddd scaffold Order -m orders --fields "customer:relation:Customer:ManyToOne"
+slade scaffold Order -m orders --fields "customer:relation:Customer:ManyToOne"
 
 # OneToMany relation
-ddd scaffold Customer -m customers --fields "orders:relation:Order:OneToMany:customer"
+slade scaffold Customer -m customers --fields "orders:relation:Order:OneToMany:customer"
 ```
 
 ## Security Features
@@ -140,7 +141,7 @@ The CLI generates security-hardened code following OWASP Top 10:
 ### Generated Security Patterns
 
 ```bash
-ddd security-patterns
+slade security-patterns
 ```
 
 Creates:
@@ -167,13 +168,13 @@ Creates:
 
 ```bash
 # List available recipes
-ddd recipe
+slade recipe
 
 # Apply with dependency installation
-ddd recipe auth-jwt --install-deps
-ddd recipe event-backbone --install-deps
-ddd recipe oidc-dashboard --install-deps
-ddd recipe platform-service-access-request-context
+slade recipe auth-jwt --install-deps
+slade recipe event-backbone --install-deps
+slade recipe oidc-dashboard --install-deps
+slade recipe platform-service-access-request-context
 ```
 
 | Recipe | Description |
@@ -210,15 +211,16 @@ src/
 │           ├── services/           # Domain services
 │           └── usecases/           # Business logic
 │       └── infrastructure/
-│           ├── repositories/       # Data access
-│           ├── orm-entities/       # Database schemas
+│           ├── repositories/       # Data access (Drizzle queries)
+│           ├── orm-entities/       # Drizzle pgTable schema definitions
 │           └── mappers/            # Entity mapping
 ├── shared/
+│   ├── database/                   # Drizzle connection provider + DatabaseModule
 │   ├── security/                   # Security services
 │   ├── observability/              # Tracing, metrics
 │   ├── resilience/                 # Circuit breaker, retry
 │   └── infrastructure/             # Base classes, utilities
-└── migrations/
+└── drizzle.config.ts               # drizzle-kit migration config
 ```
 
 ## Configuration
@@ -227,8 +229,8 @@ Create `.dddrc.json` in your project root:
 
 ```json
 {
-  "$schema": "https://unpkg.com/nestjs-ddd-cli/ddd.schema.json",
-  "orm": "typeorm",
+  "$schema": "https://unpkg.com/slade-cli/ddd.schema.json",
+  "orm": "drizzle",
   "database": "postgres",
   "naming": {
     "table": "snake_case",
@@ -256,7 +258,7 @@ Create `.dddrc.json` in your project root:
 `features.delete` controls whether aggregate scaffolds emit the generic DELETE
 controller route, delete command/use case, and repository `delete`/`hardDelete`
 surface. It defaults to `true` for compatibility. Set it to `false`, or pass
-`--no-delete` to `ddd scaffold`/`ddd generate all`, for a non-destructive aggregate
+`--no-delete` to `slade scaffold`/`slade generate all`, for a non-destructive aggregate
 scaffold. This does not remove existing generated files and does not disable
 soft-delete columns or active-row filtering.
 
@@ -275,50 +277,50 @@ helper. It never changes the ordinary `delete` method, and it is omitted when
 ### E-commerce with Security
 
 ```bash
-ddd init ecommerce-api
+slade init ecommerce-api
 cd ecommerce-api
 
 # Core security
-ddd security-patterns
-ddd recipe auth-jwt --install-deps
+slade security-patterns
+slade recipe auth-jwt --install-deps
 
 # Domain modules
-ddd scaffold Product -m inventory --fields "name:string price:money sku:string:unique stock:int"
-ddd scaffold Order -m orders --fields "total:money status:enum:pending,paid,shipped customerId:uuid"
-ddd scaffold Customer -m customers --fields "email:string:unique name:string"
+slade scaffold Product -m inventory --fields "name:string price:money sku:string:unique stock:int"
+slade scaffold Order -m orders --fields "total:money status:enum:pending,paid,shipped customerId:uuid"
+slade scaffold Customer -m customers --fields "email:string:unique name:string"
 
 # Enterprise features
-ddd circuit-breaker
-ddd observability
-ddd caching-advanced
+slade circuit-breaker
+slade observability
+slade caching-advanced
 ```
 
 ### Microservice with Observability
 
 ```bash
-ddd init payment-service
+slade init payment-service
 cd payment-service
 
 # Infrastructure
-ddd security-patterns
-ddd observability
-ddd metrics-prometheus
-ddd health-probes
+slade security-patterns
+slade observability
+slade metrics-prometheus
+slade health-probes
 
 # Domain
-ddd scaffold Transaction -m payments --fields "amount:money currency:string status:enum:pending,completed,failed"
-ddd circuit-breaker
+slade scaffold Transaction -m payments --fields "amount:money currency:string status:enum:pending,completed,failed"
+slade circuit-breaker
 ```
 
 ### GraphQL API with Real-time
 
 ```bash
-ddd init realtime-api
+slade init realtime-api
 cd realtime-api
 
-ddd scaffold Message -m chat --fields "content:text senderId:uuid roomId:uuid"
-ddd graphql-subscriptions
-ddd caching-advanced
+slade scaffold Message -m chat --fields "content:text senderId:uuid roomId:uuid"
+slade graphql-subscriptions
+slade caching-advanced
 ```
 
 ## AI Integration
@@ -389,14 +391,14 @@ Response:
 ## Contributing
 
 ```bash
-git clone https://github.com/eshe-huli/nestjs-ddd-cli
-cd nestjs-ddd-cli
+git clone https://github.com/tambongslade/slade-cli
+cd slade-cli
 npm install
 npm run build
 npm link
 
 # Test locally
-ddd scaffold Test -m test-module --fields "name:string"
+slade scaffold Test -m test-module --fields "name:string"
 ```
 
 ## License

@@ -1,9 +1,10 @@
 import { Module } from "@nestjs/common";
 import { CqrsModule } from "@nestjs/cqrs";
-import { TypeOrmModule } from "@nestjs/typeorm";
 
 // Infrastructure
-import { OrmEntities } from "@modules/{{moduleNameKebab}}/infrastructure/orm-entities";
+// Drizzle needs no per-module registration — repositories inject the global
+// DRIZZLE connection from @shared/database directly. The Prisma equivalent
+// (PrismaModule) is also wired globally, so nothing module-scoped is needed here.
 import { Repositories } from "@modules/{{moduleNameKebab}}/infrastructure/repositories";
 import { Mappers } from "@modules/{{moduleNameKebab}}/infrastructure/mappers";
 
@@ -24,7 +25,6 @@ import { Controllers } from "@modules/{{moduleNameKebab}}/application/controller
 
 @Module({
   imports: [
-    TypeOrmModule.forFeature([...OrmEntities]),
     CqrsModule,
   ],
   controllers: [...Controllers],

@@ -76,19 +76,23 @@ export interface TemplateData {
   ormColumns?: string;
   migrationColumns?: string;
   responseProperties?: string;
+  drizzleColumns?: string;
+  drizzleImports?: string;
   // Relation properties
   hasRelations: boolean;
   relationImports?: string;
+  drizzleRelationImports?: string;
   // Configuration-aware generation properties
-  orm: 'typeorm' | 'prisma' | 'mikro-orm';
+  orm: 'drizzle' | 'prisma';
   isPrisma: boolean;
+  isDrizzle: boolean;
   softDelete: boolean;
   hardDelete: boolean;
   deleteEnabled: boolean;
 }
 
 export interface TemplateGenerationConfig {
-  orm?: 'typeorm' | 'prisma' | 'mikro-orm';
+  orm?: 'drizzle' | 'prisma';
   features?: {
     delete?: boolean;
     softDelete?: boolean;
@@ -146,6 +150,24 @@ export function prepareTemplateData(
           )
           .join('\n')
       : '';
+
+  // Drizzle only needs an import for the target table when a real FK column is
+  // generated (ManyToOne/OneToOne) — OneToMany/ManyToMany don't produce a column.
+  const drizzleRelationTargets = [
+    ...new Set(
+      relationFields
+        .filter((f) => f.relationType === 'ManyToOne' || f.relationType === 'OneToOne')
+        .map((f) => f.relationTarget)
+        .filter(Boolean),
+    ),
+  ];
+  const drizzleRelationImports =
+    drizzleRelationTargets.length > 0
+      ? drizzleRelationTargets
+          .map((target) => `import { ${target}Table } from "./${toKebabCase(target!)}.orm-entity";`)
+          .join('\n')
+      : '';
+
   const softDelete = generationConfig.features?.softDelete ?? true;
   const deleteEnabled = generationConfig.features?.delete ?? true;
 
@@ -176,12 +198,20 @@ export function prepareTemplateData(
     ormColumns: fieldsTemplateData?.ormColumns || '',
     migrationColumns: fieldsTemplateData?.migrationColumns || '',
     responseProperties: fieldsTemplateData?.responseProperties || '',
+    drizzleColumns: fieldsTemplateData?.drizzleColumns || '',
+    // uuid/boolean/timestamp are always imported for the base entity columns
+    drizzleImports:
+      fieldsTemplateData?.drizzleImports
+        ?.filter((i) => !['uuid', 'boolean', 'timestamp'].includes(i))
+        .join(', ') || '',
     // Relation properties
     hasRelations,
     relationImports,
+    drizzleRelationImports,
     // Configuration-aware generation properties
-    orm: generationConfig.orm ?? 'typeorm',
+    orm: generationConfig.orm ?? 'drizzle',
     isPrisma: generationConfig.orm === 'prisma',
+    isDrizzle: generationConfig.orm !== 'prisma',
     softDelete,
     hardDelete: deleteEnabled && softDelete && (generationConfig.features?.hardDelete ?? false),
     deleteEnabled,

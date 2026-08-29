@@ -28,7 +28,9 @@ describe('Scaffold Generator', () => {
 
     expect(await fs.pathExists(path.join(testDir, 'src'))).toBe(false);
 
-    const plannedFiles = getDryRunFiles().map((change) => path.relative(testDir, change.filePath));
+    const plannedFiles = getDryRunFiles().map((change) =>
+      path.relative(testDir, change.filePath).split(path.sep).join('/'),
+    );
     expect(plannedFiles).toContain('src/modules/capital-markets/capital-markets.module.ts');
     expect(plannedFiles).toContain(
       'src/modules/capital-markets/application/domain/entities/capital-party.entity.ts',
@@ -175,8 +177,8 @@ describe('Scaffold Generator', () => {
 
     expect(entity).toContain('amount: string;');
     expect(entity).toContain('tenantId: string;');
-    expect(ormEntity).toMatch(/@Column\(\{ type: "decimal" \}\)\s+amount: string;/);
-    expect(createDto).toContain('@IsDecimal({ decimal_digits: \'0,18\', force_decimal: false })');
+    expect(ormEntity).toMatch(/amount: numeric\("amount", \{ mode: "string" \}\)\.notNull\(\)/);
+    expect(createDto).toContain("@IsDecimal({ decimal_digits: '0,18', force_decimal: false })");
     expect(createDto).toContain('type: String, format: "decimal", example: "1250.00"');
     expect(createDto).not.toContain('tenantId');
     expect(responseDto).toContain('amount: string;');
@@ -187,17 +189,6 @@ describe('Scaffold Generator', () => {
     expect(createUseCase).not.toContain('...dto');
     expect(updateUseCase).not.toContain('dto.tenantId');
     expect(updateUseCase).not.toContain('...dto');
-
-    const migrationFiles = await fs.readdir(path.join(testDir, 'src/migrations'));
-    const migration = await fs.readFile(
-      path.join(
-        testDir,
-        'src/migrations',
-        migrationFiles.find((fileName) => fileName.includes('create_ledger_lines_table'))!,
-      ),
-      'utf-8',
-    );
-    expect(migration).toMatch(/name: "amount",\s+type: "decimal"/);
   });
 
   it('generates tests with resolvable sibling imports', async () => {
@@ -235,46 +226,24 @@ describe('Scaffold Generator', () => {
     expect(useCaseTest).toContain('from "./create-permission-assignment.use-case"');
   });
 
-  it('writes scaffold migrations to the default src/migrations directory', async () => {
+  it('does not hand-write a migration file — Drizzle generates SQL migrations from the schema', async () => {
     await generateAll('LedgerEntry', {
       module: 'ledger',
       path: testDir,
       fields: 'amount:decimal',
     });
 
-    const migrationFiles = await fs.readdir(path.join(testDir, 'src/migrations'));
-    expect(
-      migrationFiles.some((fileName) => fileName.endsWith('-create_ledger_entries_table.ts')),
-    ).toBe(true);
-  });
+    expect(await fs.pathExists(path.join(testDir, 'src/migrations'))).toBe(false);
+    expect(await fs.pathExists(path.join(testDir, 'drizzle.config.ts'))).toBe(true);
 
-  it('uses paths.migrations from .dddrc.json for scaffold migrations', async () => {
-    const workspacePath = path.join(testDir, 'workspace');
-    const appPath = path.join(workspacePath, 'apps/api');
-    const migrationsPath = path.join(workspacePath, 'packages/infra/src/migrations');
-    await fs.ensureDir(path.join(workspacePath, '.git'));
-    await fs.ensureDir(appPath);
-    await fs.writeJson(path.join(appPath, '.dddrc.json'), {
-      paths: {
-        migrations: '../../packages/infra/src/migrations',
-      },
-    });
-
-    await generateAll('SettlementBatch', {
-      module: 'settlements',
-      path: appPath,
-      fields: 'reference:string',
-      dryRun: true,
-    });
-
-    expect(
-      getDryRunFiles().some(
-        (change) =>
-          path.dirname(change.filePath) === migrationsPath &&
-          path.basename(change.filePath).endsWith('-create_settlement_batches_table.ts'),
+    const schemaContent = await fs.readFile(
+      path.join(
+        testDir,
+        'src/modules/ledger/infrastructure/orm-entities/ledger-entry.orm-entity.ts',
       ),
-    ).toBe(true);
-    expect(await fs.pathExists(path.join(appPath, 'src/migrations'))).toBe(false);
+      'utf-8',
+    );
+    expect(schemaContent).toContain('amount: numeric("amount", { mode: "number" })');
   });
 
   it('merges barrel indexes across scaffold runs without dropping existing registrations', async () => {
@@ -312,7 +281,7 @@ describe('Scaffold Generator', () => {
     expect(commandsIndex.match(/CreateCapitalPartyHandler/g)).toHaveLength(2);
     expect(controllersIndex).toContain('ExecutionIntentController');
     expect(controllersIndex).toContain('CapitalPartyController');
-    expect(ormIndex).toContain('ExecutionIntentOrmEntity');
-    expect(ormIndex).toContain('CapitalPartyOrmEntity');
+    expect(ormIndex).toContain('executionIntentTable');
+    expect(ormIndex).toContain('capitalPartyTable');
   });
 });

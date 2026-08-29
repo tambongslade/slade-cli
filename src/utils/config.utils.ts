@@ -3,8 +3,8 @@ import * as path from 'path';
 import { cosmiconfig } from 'cosmiconfig';
 
 export interface DddConfig {
-  orm: 'typeorm' | 'prisma' | 'mikro-orm';
-  database: 'postgres' | 'mysql' | 'mongodb' | 'sqlite';
+  orm: 'drizzle' | 'prisma';
+  database: 'postgres';
   naming: {
     table: 'snake_case' | 'camelCase' | 'PascalCase';
     dto: 'snake_case' | 'camelCase';
@@ -31,7 +31,7 @@ export interface DddConfig {
 }
 
 const DEFAULT_CONFIG: DddConfig = {
-  orm: 'typeorm',
+  orm: 'drizzle',
   database: 'postgres',
   naming: {
     table: 'snake_case',
@@ -135,7 +135,7 @@ export async function createDefaultConfig(basePath: string): Promise<void> {
   const configPath = path.join(basePath, '.dddrc.json');
 
   const configContent = {
-    $schema: 'https://unpkg.com/nestjs-ddd-cli/ddd.schema.json',
+    $schema: 'https://unpkg.com/slade-cli/ddd.schema.json',
     ...DEFAULT_CONFIG,
   };
 
@@ -153,15 +153,15 @@ export function getConfigSchema(): object {
     properties: {
       orm: {
         type: 'string',
-        enum: ['typeorm', 'prisma', 'mikro-orm'],
-        default: 'typeorm',
+        enum: ['drizzle', 'prisma'],
+        default: 'drizzle',
         description: 'ORM to use for database operations',
       },
       database: {
         type: 'string',
-        enum: ['postgres', 'mysql', 'mongodb', 'sqlite'],
+        enum: ['postgres'],
         default: 'postgres',
-        description: 'Database type',
+        description: 'Database type (Postgres only)',
       },
       naming: {
         type: 'object',

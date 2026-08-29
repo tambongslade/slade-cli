@@ -11,6 +11,8 @@ export interface FieldDefinition {
   tsType: string;
   dbType: string;
   prismaType: string;
+  /** Drizzle pg-core column builder function name (e.g. "text", "numeric", "uuid") */
+  drizzleType: string;
   isRequired: boolean;
   isOptional: boolean;
   isUnique: boolean;
@@ -151,6 +153,9 @@ export function parseFields(fieldsString: string): ParsedFields {
     // Determine Prisma type
     const prismaType = mapToPrismaType(baseType, isArray);
 
+    // Determine Drizzle pg-core column builder
+    const drizzleType = mapToDrizzleType(baseType, isArray);
+
     // Generate validators
     const validators = generateValidators(
       name,
@@ -186,6 +191,7 @@ export function parseFields(fieldsString: string): ParsedFields {
         : tsType,
       dbType,
       prismaType,
+      drizzleType,
       isRequired: !isOptional,
       isOptional,
       isUnique,
@@ -275,6 +281,35 @@ function mapToPrismaType(type: string, isArray: boolean): string {
 
   const prismaType = typeMap[type.toLowerCase()] || 'String';
   return isArray ? `${prismaType}[]` : prismaType;
+}
+
+/**
+ * Map a field type to the Drizzle pg-core column builder function name.
+ * `money` and `decimal` both map to `numeric`; the mapper layer is responsible
+ * for requesting `{ mode: "string" }` on `money` columns so they stay exact.
+ */
+function mapToDrizzleType(type: string, isArray: boolean): string {
+  const typeMap: Record<string, string> = {
+    string: 'text',
+    number: 'integer',
+    int: 'integer',
+    integer: 'integer',
+    float: 'doublePrecision',
+    decimal: 'numeric',
+    money: 'numeric',
+    boolean: 'boolean',
+    bool: 'boolean',
+    date: 'date',
+    datetime: 'timestamp',
+    timestamp: 'timestamp',
+    uuid: 'uuid',
+    json: 'jsonb',
+    text: 'text',
+    enum: 'text',
+  };
+
+  const drizzleType = typeMap[type.toLowerCase()] || 'text';
+  return isArray ? 'jsonb' : drizzleType;
 }
 
 function generateValidators(
@@ -426,6 +461,52 @@ function generateRelationDecorator(f: FieldDefinition): string {
   }
 }
 
+/**
+ * Generate a Drizzle pg-core column definition line for one field.
+ * Returns the builder function name(s) it needs so the caller can dedupe imports.
+ */
+function generateDrizzleColumn(f: FieldDefinition): { line: string; imports: string[] } {
+  if (f.isRelation) {
+    // Drizzle has no column-level relation decorators. ManyToOne/OneToOne are a
+    // real foreign-key column; OneToMany/ManyToMany have no column on this side
+    // and must be wired up with Drizzle's `relations()` helper instead.
+    if (f.relationType === 'ManyToOne' || f.relationType === 'OneToOne') {
+      const fkName = `${f.camelCase}Id`;
+      const notNull = f.isOptional ? '' : '.notNull()';
+      const uniqueCall = f.relationType === 'OneToOne' ? '.unique()' : '';
+      const targetTable = `${f.relationTarget}Table`;
+      return {
+        line: `  ${fkName}: uuid("${f.snakeCase}_id")${notNull}${uniqueCall}.references(() => ${targetTable}.id),`,
+        imports: ['uuid'],
+      };
+    }
+
+    return {
+      line: `  // ${f.camelCase} (${f.relationType}) has no column here — define it with Drizzle's relations() helper`,
+      imports: [],
+    };
+  }
+
+  const options: string[] = [];
+  // money must stay an exact decimal string; plain `decimal` keeps the
+  // established `number` TypeScript type for backward compatibility, so
+  // Drizzle needs to coerce it back to a JS number.
+  if (f.isMoney) options.push('mode: "string"');
+  else if (f.type.toLowerCase() === 'decimal') options.push('mode: "number"');
+  const optionsStr = options.length > 0 ? `, { ${options.join(', ')} }` : '';
+  const timezoneStr =
+    f.drizzleType === 'timestamp' ? (optionsStr ? '' : ', { withTimezone: true }') : '';
+
+  let call = `${f.drizzleType}("${f.snakeCase}"${optionsStr}${timezoneStr})`;
+  if (!f.isOptional) call += '.notNull()';
+  if (f.isUnique) call += '.unique()';
+
+  return {
+    line: `  ${f.camelCase}: ${call},`,
+    imports: [f.drizzleType],
+  };
+}
+
 function generateDescription(name: string, type: string): string {
   const readableName = name
     .replace(/([A-Z])/g, ' $1')
@@ -480,6 +561,8 @@ export function generateFieldsTemplateData(fields: FieldDefinition[]): {
   ormColumns: string;
   migrationColumns: string;
   responseProperties: string;
+  drizzleColumns: string;
+  drizzleImports: string[];
 } {
   const entityProperties = fields
     .map((f) => `  public readonly ${f.camelCase}${f.isOptional ? '?' : ''}: ${f.tsType};`)
@@ -536,6 +619,10 @@ export function generateFieldsTemplateData(fields: FieldDefinition[]): {
     )
     .join('\n\n');
 
+  const drizzleColumnResults = fields.map((f) => generateDrizzleColumn(f));
+  const drizzleColumns = drizzleColumnResults.map((r) => r.line).join('\n');
+  const drizzleImports = [...new Set(drizzleColumnResults.flatMap((r) => r.imports))].sort();
+
   return {
     entityProperties,
     entityPropsInterface,
@@ -543,5 +630,7 @@ export function generateFieldsTemplateData(fields: FieldDefinition[]): {
     ormColumns,
     migrationColumns,
     responseProperties,
+    drizzleColumns,
+    drizzleImports,
   };
 }

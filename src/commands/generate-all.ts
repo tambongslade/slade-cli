@@ -12,17 +12,16 @@ import {
   resetDryRunFiles,
   getDryRunFiles,
 } from '../utils/file.utils';
-import { toKebabCase, toPascalCase, toPlural } from '../utils/naming.utils';
+import { toKebabCase, toPascalCase, toCamelCase, toPlural } from '../utils/naming.utils';
 import { installDependencies } from '../utils/dependency.utils';
 import { loadConfig } from '../utils/config.utils';
-import { resolveMigrationOutputPath } from './migration';
 
 export async function generateAll(entityName: string, options: any) {
   console.log(chalk.blue(`\n🚀 Generating complete scaffolding for: ${entityName}`));
 
   const basePath = options.path || process.cwd();
   const config = await loadConfig(basePath);
-  const orm = options.orm || config.orm || 'typeorm';
+  const orm = options.orm || config.orm || 'drizzle';
   const dryRun = !!options.dryRun;
 
   if (dryRun) {
@@ -32,15 +31,25 @@ export async function generateAll(entityName: string, options: any) {
 
   // Check if we need to install dependencies
   const requiredDeps = ['@nestjs/cqrs', 'class-validator', 'class-transformer', '@nestjs/swagger'];
+  const requiredDevDeps: string[] = [];
   if (orm === 'prisma') {
     requiredDeps.push('@prisma/client', 'prisma');
   } else {
-    requiredDeps.push('typeorm', '@nestjs/typeorm');
+    requiredDeps.push('drizzle-orm', 'postgres');
+    requiredDevDeps.push('drizzle-kit');
   }
   if (options.installDeps && !dryRun) {
     await installDependencies(options.path || process.cwd(), requiredDeps);
+    if (requiredDevDeps.length > 0) {
+      await installDependencies(options.path || process.cwd(), requiredDevDeps, true);
+    }
   } else if (options.installDeps && dryRun) {
     console.log(chalk.yellow(`  Dry run: would install dependencies: ${requiredDeps.join(', ')}`));
+    if (requiredDevDeps.length > 0) {
+      console.log(
+        chalk.yellow(`  Dry run: would install dev dependencies: ${requiredDevDeps.join(', ')}`),
+      );
+    }
   }
 
   const moduleName = options.module || entityName;
@@ -75,9 +84,11 @@ export async function generateAll(entityName: string, options: any) {
     _fromGenerateAll: true,
   });
 
-  // Generate PrismaService if using Prisma
+  // Generate the shared database bootstrap (PrismaService, or the Drizzle connection provider)
   if (orm === 'prisma') {
     await generatePrismaService(basePath, dryRun);
+  } else {
+    await generateDrizzleService(basePath, dryRun);
   }
 
   // Generate CRUD commands
@@ -118,13 +129,16 @@ export async function generateAll(entityName: string, options: any) {
   );
   await generateFromTemplate(controllerTemplatePath, controllerOutputPath, templateData, dryRun);
 
-  // Generate migration file or Prisma schema snippet
+  // Generate migration file, Prisma schema snippet, or a Drizzle migration reminder
   if (orm === 'prisma') {
     console.log(chalk.cyan('  Generating Prisma schema snippet...'));
     await generatePrismaSchemaSnippet(entityName, basePath, templateData, dryRun);
   } else {
-    console.log(chalk.cyan('  Generating migration...'));
-    await generateMigration(entityName, basePath, templateData, dryRun);
+    console.log(
+      chalk.cyan(
+        `  Drizzle schema updated — run ${chalk.white('npx drizzle-kit generate')} to create the SQL migration.`,
+      ),
+    );
   }
 
   // Generate barrel exports
@@ -152,7 +166,7 @@ export async function generateAll(entityName: string, options: any) {
   console.log(chalk.cyan(`\n📁 Generated structure:`));
   console.log(`   ${chalk.white('Module:')} ${modulePath}`);
   console.log(`   ${chalk.white('Entity:')} ${entityName}`);
-  console.log(`   ${chalk.white('ORM:')} ${orm === 'prisma' ? 'Prisma' : 'TypeORM'}`);
+  console.log(`   ${chalk.white('ORM:')} ${orm === 'prisma' ? 'Prisma' : 'Drizzle (Postgres)'}`);
   console.log(
     `   ${chalk.white('Commands:')} Create, Update${templateData.deleteEnabled ? ', Delete' : ''}`,
   );
@@ -166,7 +180,7 @@ export async function generateAll(entityName: string, options: any) {
   );
   console.log(`   ${chalk.white('Repository:')} With pagination support`);
   console.log(
-    `   ${chalk.white('Mapper:')} Domain ↔ ${orm === 'prisma' ? 'Prisma' : 'ORM'} ↔ Response`,
+    `   ${chalk.white('Mapper:')} Domain ↔ ${orm === 'prisma' ? 'Prisma' : 'Drizzle'} ↔ Response`,
   );
   if (options.withGraphql) {
     console.log(`   ${chalk.white('GraphQL:')} Resolver, Types, Inputs`);
@@ -189,7 +203,9 @@ export async function generateAll(entityName: string, options: any) {
     );
     console.log(`   4. Run: ${chalk.cyan('npx prisma generate')}`);
   } else {
-    console.log(`   2. Run the migration: ${chalk.cyan('npm run migration:run')}`);
+    console.log(
+      `   2. Run: ${chalk.cyan('npx drizzle-kit generate')} then ${chalk.cyan('npx drizzle-kit migrate')}`,
+    );
   }
   console.log(
     `   ${orm === 'prisma' ? '5' : '3'}. Import ${toPascalCase(moduleName)}Module in your app.module.ts`,
@@ -339,98 +355,16 @@ async function generatePaginationDtos(modulePath: string, templateData: any, dry
   }
 }
 
-async function generateMigration(
-  entityName: string,
-  basePath: string,
-  templateData: any,
-  dryRun = false,
-) {
-  const timestamp = Date.now();
-  const tableName = templateData.tableName;
-  const migrationName = `create_${tableName}_table`;
-  const fileName = `${timestamp}-${migrationName}.ts`;
-
-  const fieldsColumns =
-    templateData.migrationColumns ||
-    `          // Add your custom columns here
-          // Example:
-          // {
-          //   name: "name",
-          //   type: "varchar",
-          //   isNullable: false,
-          // },`;
-  const softDeleteColumn = templateData.softDelete
-    ? `          {
-            name: "deleted_at",
-            type: "timestamp",
-            isNullable: true,
-          },`
-    : '';
-
-  const content = `import { MigrationInterface, QueryRunner, Table } from "typeorm";
-
-export class Create${toPascalCase(entityName)}Table${timestamp} implements MigrationInterface {
-  public async up(queryRunner: QueryRunner): Promise<void> {
-    await queryRunner.createTable(
-      new Table({
-        name: "${tableName}",
-        columns: [
-          {
-            name: "id",
-            type: "uuid",
-            isPrimary: true,
-            generationStrategy: "uuid",
-            default: "uuid_generate_v4()",
-          },
-${fieldsColumns}
-          {
-            name: "is_active",
-            type: "boolean",
-            default: true,
-          },
-          {
-            name: "created_at",
-            type: "timestamp",
-            default: "CURRENT_TIMESTAMP",
-          },
-          {
-            name: "updated_at",
-            type: "timestamp",
-            default: "CURRENT_TIMESTAMP",
-          },
-${softDeleteColumn}
-        ],
-      }),
-      true,
-    );
-  }
-
-  public async down(queryRunner: QueryRunner): Promise<void> {
-    await queryRunner.dropTable("${tableName}");
-  }
-}
-`;
-
-  const config = await loadConfig(basePath);
-  const migrationsDir = resolveMigrationOutputPath(
-    basePath,
-    config.paths.migrations,
-    'src/migrations',
-  );
-  const migrationPath = path.join(migrationsDir, fileName);
-  await writeGeneratedFile(migrationPath, content, dryRun);
-  console.log(chalk.green(`   ✓ Migration: ${fileName}`));
-}
-
 async function generateBarrelExports(
   entityName: string,
   modulePath: string,
-  orm: string = 'typeorm',
+  orm: string = 'drizzle',
   dryRun = false,
   deleteEnabled = true,
 ) {
   const entityNameKebab = toKebabCase(entityName);
   const entityNamePascal = toPascalCase(entityName);
+  const entityNameCamel = toCamelCase(entityName);
   const entityNamePluralKebab = toKebabCase(toPlural(entityName));
   const entityNamePluralPascal = toPlural(toPascalCase(entityName));
   const isPrisma = orm === 'prisma';
@@ -447,7 +381,9 @@ async function generateBarrelExports(
       `import { Create${entityNamePascal}Handler } from './create-${entityNameKebab}.command';`,
       `import { Update${entityNamePascal}Handler } from './update-${entityNameKebab}.command';`,
       ...(deleteEnabled
-        ? [`import { Delete${entityNamePascal}Handler } from './delete-${entityNameKebab}.command';`]
+        ? [
+            `import { Delete${entityNamePascal}Handler } from './delete-${entityNameKebab}.command';`,
+          ]
         : []),
     ],
     arrayName: 'CommandHandlers',
@@ -487,7 +423,9 @@ async function generateBarrelExports(
       `import { Create${entityNamePascal}UseCase } from './create-${entityNameKebab}.use-case';`,
       `import { Update${entityNamePascal}UseCase } from './update-${entityNameKebab}.use-case';`,
       ...(deleteEnabled
-        ? [`import { Delete${entityNamePascal}UseCase } from './delete-${entityNameKebab}.use-case';`]
+        ? [
+            `import { Delete${entityNamePascal}UseCase } from './delete-${entityNameKebab}.use-case';`,
+          ]
         : []),
     ],
     arrayName: 'UseCases',
@@ -564,14 +502,14 @@ async function generateBarrelExports(
     dryRun,
   });
 
-  // ORM entities index (TypeORM only)
+  // ORM entities index (Drizzle only — Prisma has no per-entity schema file)
   if (!isPrisma) {
     const ormEntitiesIndexPath = path.join(modulePath, 'infrastructure/orm-entities/index.ts');
     await updateBarrelFile(ormEntitiesIndexPath, {
       exports: [`export * from './${entityNameKebab}.orm-entity';`],
-      imports: [`import { ${entityNamePascal}OrmEntity } from './${entityNameKebab}.orm-entity';`],
+      imports: [`import { ${entityNameCamel}Table } from './${entityNameKebab}.orm-entity';`],
       arrayName: 'OrmEntities',
-      arrayItems: [`${entityNamePascal}OrmEntity`],
+      arrayItems: [`${entityNameCamel}Table`],
       dryRun,
     });
   }
@@ -588,7 +526,7 @@ async function generateTests(
   // Repository test
   const repoTestTemplatePath = templateData.isPrisma
     ? path.join(__dirname, '../templates/test/prisma-repository.spec.hbs')
-    : path.join(__dirname, '../templates/test/repository.spec.hbs');
+    : path.join(__dirname, '../templates/test/drizzle-repository.spec.hbs');
   const repoTestOutputPath = path.join(
     modulePath,
     'infrastructure/repositories',
@@ -785,6 +723,85 @@ export class PrismaModule {}
 export * from "./prisma.module";
 `;
     await writeGeneratedFile(indexPath, indexContent, dryRun);
+  }
+}
+
+async function generateDrizzleService(basePath: string, dryRun = false) {
+  const providerPath = path.join(basePath, 'src/shared/database/drizzle.provider.ts');
+
+  if (await fileExists(providerPath)) {
+    console.log(chalk.yellow(`   Drizzle connection provider already exists. Skipping...`));
+    return;
+  }
+
+  const providerContent = `import { drizzle, type PostgresJsDatabase } from "drizzle-orm/postgres-js";
+import postgres from "postgres";
+
+export const DRIZZLE = Symbol("DRIZZLE_CONNECTION");
+
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+export type DrizzleDb = PostgresJsDatabase<Record<string, any>>;
+
+export function createDrizzleConnection(): DrizzleDb {
+  const connectionString = process.env.DATABASE_URL;
+
+  if (!connectionString) {
+    throw new Error("DATABASE_URL is required to connect to Postgres");
+  }
+
+  const client = postgres(connectionString, { max: 10 });
+  return drizzle(client);
+}
+`;
+  await writeGeneratedFile(providerPath, providerContent, dryRun);
+  console.log(chalk.green(`   ✓ Drizzle connection provider`));
+
+  const modulePath = path.join(basePath, 'src/shared/database/database.module.ts');
+  if (!(await fileExists(modulePath))) {
+    const moduleContent = `import { Global, Module } from "@nestjs/common";
+import { DRIZZLE, createDrizzleConnection } from "./drizzle.provider";
+
+@Global()
+@Module({
+  providers: [
+    {
+      provide: DRIZZLE,
+      useFactory: createDrizzleConnection,
+    },
+  ],
+  exports: [DRIZZLE],
+})
+export class DatabaseModule {}
+`;
+    await writeGeneratedFile(modulePath, moduleContent, dryRun);
+    console.log(chalk.green(`   ✓ DatabaseModule`));
+  }
+
+  const indexPath = path.join(basePath, 'src/shared/database/index.ts');
+  if (!(await fileExists(indexPath))) {
+    const indexContent = `export * from "./drizzle.provider";
+export * from "./database.module";
+`;
+    await writeGeneratedFile(indexPath, indexContent, dryRun);
+  }
+
+  // drizzle-kit config, so `npx drizzle-kit generate` / `migrate` pick up every
+  // module's schema file without a hand-maintained barrel.
+  const drizzleConfigPath = path.join(basePath, 'drizzle.config.ts');
+  if (!(await fileExists(drizzleConfigPath))) {
+    const drizzleConfigContent = `import { defineConfig } from "drizzle-kit";
+
+export default defineConfig({
+  schema: "./src/modules/**/infrastructure/orm-entities/*.orm-entity.ts",
+  out: "./drizzle",
+  dialect: "postgresql",
+  dbCredentials: {
+    url: process.env.DATABASE_URL!,
+  },
+});
+`;
+    await writeGeneratedFile(drizzleConfigPath, drizzleConfigContent, dryRun);
+    console.log(chalk.green(`   ✓ drizzle.config.ts`));
   }
 }
 

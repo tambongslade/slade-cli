@@ -7,7 +7,7 @@ import {
   fileExists,
   updateBarrelFile,
 } from '../utils/file.utils';
-import { toKebabCase, toPascalCase } from '../utils/naming.utils';
+import { toKebabCase, toPascalCase, toCamelCase } from '../utils/naming.utils';
 
 export async function generateEntity(entityName: string, options: any) {
   if (!options.module) {
@@ -45,9 +45,9 @@ export async function generateEntity(entityName: string, options: any) {
 
   const isPrisma = orm === 'prisma';
 
-  // Generate ORM entity if not skipped (TypeORM only - Prisma uses schema.prisma)
+  // Generate the schema file if not skipped (Drizzle table definition; Prisma uses schema.prisma)
   if (!options.skipOrm && !isPrisma) {
-    const ormTemplatePath = path.join(__dirname, '../templates/orm-entity/orm-entity.hbs');
+    const ormTemplatePath = path.join(__dirname, '../templates/drizzle/drizzle-schema.hbs');
     const ormOutputPath = path.join(
       modulePath,
       'infrastructure/orm-entities',
@@ -56,7 +56,7 @@ export async function generateEntity(entityName: string, options: any) {
 
     if (!(await fileExists(ormOutputPath))) {
       await generateFromTemplate(ormTemplatePath, ormOutputPath, templateData, dryRun);
-      console.log(chalk.green(`    ✓ ORM entity (TypeORM)`));
+      console.log(chalk.green(`    ✓ Drizzle schema`));
     }
   }
 
@@ -64,7 +64,7 @@ export async function generateEntity(entityName: string, options: any) {
   if (!options.skipMapper) {
     const mapperTemplatePath = isPrisma
       ? path.join(__dirname, '../templates/prisma/prisma-mapper.hbs')
-      : path.join(__dirname, '../templates/mapper/mapper.hbs');
+      : path.join(__dirname, '../templates/drizzle/drizzle-mapper.hbs');
     const mapperOutputPath = path.join(
       modulePath,
       'infrastructure/mappers',
@@ -73,7 +73,7 @@ export async function generateEntity(entityName: string, options: any) {
 
     if (!(await fileExists(mapperOutputPath))) {
       await generateFromTemplate(mapperTemplatePath, mapperOutputPath, templateData, dryRun);
-      console.log(chalk.green(`    ✓ Mapper (${isPrisma ? 'Prisma' : 'TypeORM'})`));
+      console.log(chalk.green(`    ✓ Mapper (${isPrisma ? 'Prisma' : 'Drizzle'})`));
     }
   }
 
@@ -81,7 +81,7 @@ export async function generateEntity(entityName: string, options: any) {
   if (!options.skipRepo) {
     const repoTemplatePath = isPrisma
       ? path.join(__dirname, '../templates/prisma/prisma-repository.hbs')
-      : path.join(__dirname, '../templates/repository/repository.hbs');
+      : path.join(__dirname, '../templates/drizzle/drizzle-repository.hbs');
     const repoOutputPath = path.join(
       modulePath,
       'infrastructure/repositories',
@@ -90,7 +90,7 @@ export async function generateEntity(entityName: string, options: any) {
 
     if (!(await fileExists(repoOutputPath))) {
       await generateFromTemplate(repoTemplatePath, repoOutputPath, templateData, dryRun);
-      console.log(chalk.green(`    ✓ Repository (${isPrisma ? 'Prisma' : 'TypeORM'})`));
+      console.log(chalk.green(`    ✓ Repository (${isPrisma ? 'Prisma' : 'Drizzle'})`));
     }
   }
 
@@ -121,6 +121,7 @@ export async function generateEntity(entityName: string, options: any) {
 async function updateIndexFiles(modulePath: string, entityName: string, options: any) {
   const entityNameKebab = toKebabCase(entityName);
   const entityNamePascal = toPascalCase(entityName);
+  const entityNameCamel = toCamelCase(entityName);
   const dryRun = !!options.dryRun;
 
   // Entities index
@@ -131,13 +132,13 @@ async function updateIndexFiles(modulePath: string, entityName: string, options:
   });
 
   if (!options.skipOrm && options.orm !== 'prisma') {
-    // ORM entities index
+    // ORM entities index — Drizzle schema files export `{name}Table`, not a class
     const ormIndexPath = path.join(modulePath, 'infrastructure/orm-entities/index.ts');
     await updateBarrelFile(ormIndexPath, {
       exports: [`export * from './${entityNameKebab}.orm-entity';`],
-      imports: [`import { ${entityNamePascal}OrmEntity } from './${entityNameKebab}.orm-entity';`],
+      imports: [`import { ${entityNameCamel}Table } from './${entityNameKebab}.orm-entity';`],
       arrayName: 'OrmEntities',
-      arrayItems: [`${entityNamePascal}OrmEntity`],
+      arrayItems: [`${entityNameCamel}Table`],
       dryRun,
     });
   }

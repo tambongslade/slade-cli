@@ -1,0 +1,24 @@
+import { pgTable, uuid, boolean, timestamp{{#if drizzleImports}}, {{{drizzleImports}}}{{/if}} } from "drizzle-orm/pg-core";
+{{#if drizzleRelationImports}}
+{{{drizzleRelationImports}}}
+{{/if}}
+
+export const {{entityNameCamel}}Table = pgTable("{{tableName}}", {
+  id: uuid("id").defaultRandom().primaryKey(),
+{{#if hasFields}}
+{{{drizzleColumns}}}
+{{else}}
+  // Add your columns here
+  // Example:
+  // name: text("name").notNull(),
+{{/if}}
+  isActive: boolean("is_active").notNull().default(true),
+  createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
+{{#if softDelete}}
+  deletedAt: timestamp("deleted_at", { withTimezone: true }),
+{{/if}}
+});
+
+export type {{entityNamePascal}}Row = typeof {{entityNameCamel}}Table.$inferSelect;
+export type New{{entityNamePascal}}Row = typeof {{entityNameCamel}}Table.$inferInsert;

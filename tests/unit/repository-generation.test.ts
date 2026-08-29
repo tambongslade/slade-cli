@@ -21,7 +21,7 @@ interface GeneratedSafetySummary {
   hasHardDeleteHelper: boolean;
   hasBoundedOrderByContract: boolean;
   queryChecksOrderByField: boolean;
-  repositoryTestAdapter: 'typeorm' | 'prisma' | 'unknown';
+  repositoryTestAdapter: 'drizzle' | 'prisma' | 'unknown';
   repositoryTestUsesDeletedAt: boolean;
 }
 
@@ -35,7 +35,7 @@ describe('Safe repository scaffold generation', () => {
 
   it('generates compile-safe ordinary CRUD without soft-delete artifacts', async () => {
     const summaries = [
-      await generateFixture('typeorm-soft-delete-off', 'typeorm', false),
+      await generateFixture('drizzle-soft-delete-off', 'drizzle', false),
       await generateFixture('prisma-soft-delete-off', 'prisma', false),
     ];
 
@@ -48,10 +48,10 @@ describe('Safe repository scaffold generation', () => {
     "hasHardDeleteHelper": false,
     "mapperHasDeletedAt": false,
     "migrationOrSchemaHasDeletedAt": false,
-    "orm": "typeorm",
+    "orm": "drizzle",
     "queryChecksOrderByField": true,
     "repositoryFiltersDeletedRows": false,
-    "repositoryTestAdapter": "typeorm",
+    "repositoryTestAdapter": "drizzle",
     "repositoryTestUsesDeletedAt": false,
     "storageHasDeletedAt": false,
   },
@@ -75,7 +75,7 @@ describe('Safe repository scaffold generation', () => {
 
   it('generates compile-safe soft deletion without a hard-delete helper by default', async () => {
     const summaries = [
-      await generateFixture('typeorm-soft-delete-on', 'typeorm', true),
+      await generateFixture('drizzle-soft-delete-on', 'drizzle', true),
       await generateFixture('prisma-soft-delete-on', 'prisma', true),
     ];
 
@@ -88,10 +88,10 @@ describe('Safe repository scaffold generation', () => {
     "hasHardDeleteHelper": false,
     "mapperHasDeletedAt": true,
     "migrationOrSchemaHasDeletedAt": true,
-    "orm": "typeorm",
+    "orm": "drizzle",
     "queryChecksOrderByField": true,
     "repositoryFiltersDeletedRows": true,
-    "repositoryTestAdapter": "typeorm",
+    "repositoryTestAdapter": "drizzle",
     "repositoryTestUsesDeletedAt": true,
     "storageHasDeletedAt": true,
   },
@@ -115,7 +115,7 @@ describe('Safe repository scaffold generation', () => {
 
   it('restores only the separately named hardDelete helper when explicitly opted in', async () => {
     const summaries = [
-      await generateFixture('typeorm-hard-delete-opt-in', 'typeorm', true, true),
+      await generateFixture('drizzle-hard-delete-opt-in', 'drizzle', true, true),
       await generateFixture('prisma-hard-delete-opt-in', 'prisma', true, true),
     ];
 
@@ -126,13 +126,13 @@ describe('Safe repository scaffold generation', () => {
         hasHardDeleteHelper,
       })),
     ).toEqual([
-      { orm: 'typeorm', deleteStrategy: 'soft', hasHardDeleteHelper: true },
+      { orm: 'drizzle', deleteStrategy: 'soft', hasHardDeleteHelper: true },
       { orm: 'prisma', deleteStrategy: 'soft', hasHardDeleteHelper: true },
     ]);
   });
 
   it('applies configured ORM and soft-delete behavior to direct entity generation', async () => {
-    for (const orm of ['typeorm', 'prisma'] as const) {
+    for (const orm of ['drizzle', 'prisma'] as const) {
       const fixturePath = path.join(testDir, `${orm}-direct-entity`);
       await fs.ensureDir(fixturePath);
       await fs.writeJson(path.join(fixturePath, '.dddrc.json'), {
@@ -162,13 +162,13 @@ describe('Safe repository scaffold generation', () => {
 
       expect(generatedFiles.join('\n')).not.toMatch(/deletedAt|deleted_at/);
       expect(generatedFiles[2]).toContain(
-        orm === 'prisma' ? 'private readonly prisma: PrismaService' : 'InjectRepository',
+        orm === 'prisma' ? 'private readonly prisma: PrismaService' : '@Inject(DRIZZLE)',
       );
       expect(
         await fs.pathExists(
           path.join(modulePath, 'infrastructure/orm-entities/invoice.orm-entity.ts'),
         ),
-      ).toBe(orm === 'typeorm');
+      ).toBe(orm === 'drizzle');
     }
   });
 
@@ -176,7 +176,7 @@ describe('Safe repository scaffold generation', () => {
     const fixturePath = path.join(testDir, 'shared-module-pagination');
     await fs.ensureDir(fixturePath);
     await fs.writeJson(path.join(fixturePath, '.dddrc.json'), {
-      orm: 'typeorm',
+      orm: 'drizzle',
       features: { softDelete: false },
     });
 
@@ -185,13 +185,13 @@ describe('Safe repository scaffold generation', () => {
       module: 'billing',
       path: fixturePath,
       fields: 'amount:decimal reference:string',
-      orm: 'typeorm',
+      orm: 'drizzle',
     });
     await generateAll('CreditMemo', {
       module: 'billing',
       path: fixturePath,
       fields: 'amount:decimal reference:string',
-      orm: 'typeorm',
+      orm: 'drizzle',
     });
 
     const repositoryPath = path.join(
@@ -219,7 +219,7 @@ describe('Safe repository scaffold generation', () => {
 
     await generateRepositoryPattern('CloseChecklistDefinition', fixturePath, {
       module: 'close-orchestration',
-      orm: 'typeorm',
+      orm: 'drizzle',
     });
 
     const repositoryPath = path.join(
@@ -295,13 +295,14 @@ async function summarizeFixture(
     'utf-8',
   );
   const storage = await fs.readFile(
-    orm === 'typeorm'
+    orm === 'drizzle'
       ? path.join(modulePath, 'infrastructure/orm-entities/invoice.orm-entity.ts')
       : path.join(fixturePath, 'prisma/snippets/invoice.prisma'),
     'utf-8',
   );
-  const migrationOrSchema =
-    orm === 'typeorm' ? await readOnlyFile(path.join(fixturePath, 'src/migrations')) : storage;
+  // Neither Drizzle nor Prisma hand-writes a migration file — the schema file
+  // (or Prisma snippet) is the single source of truth for column shape.
+  const migrationOrSchema = storage;
   const deleteMethod = extractMethod(repository, 'delete');
 
   return {
@@ -310,15 +311,16 @@ async function summarizeFixture(
     storageHasDeletedAt: /deletedAt|deleted_at/.test(storage),
     migrationOrSchemaHasDeletedAt: /deletedAt|deleted_at/.test(migrationOrSchema),
     mapperHasDeletedAt: /deletedAt|deleted_at/.test(mapper),
-    repositoryFiltersDeletedRows: /deletedAt:\s*null|deleted_at:\s*null/.test(repository),
+    repositoryFiltersDeletedRows:
+      /deletedAt:\s*null|deleted_at:\s*null|isNull\(\w+Table\.deletedAt\)/.test(repository),
     deleteStrategy: getDeleteStrategy(deleteMethod),
     hasHardDeleteHelper: /async hardDelete\(/.test(repository),
     hasBoundedOrderByContract:
       /export type InvoiceOrderField/.test(repository) &&
       /orderBy:\s*InvoiceOrderField;/.test(repository),
     queryChecksOrderByField: /InvoiceRepository\.isOrderByField\(sortBy\)/.test(query),
-    repositoryTestAdapter: /@nestjs\/typeorm/.test(repositoryTest)
-      ? 'typeorm'
+    repositoryTestAdapter: /@shared\/database\/drizzle\.provider/.test(repositoryTest)
+      ? 'drizzle'
       : /@prisma\/prisma\.service/.test(repositoryTest)
         ? 'prisma'
         : 'unknown',
@@ -344,10 +346,4 @@ function getDeleteStrategy(methodBody: string): 'soft' | 'physical' | 'unknown' 
     return 'physical';
   }
   return 'unknown';
-}
-
-async function readOnlyFile(directoryPath: string): Promise<string> {
-  const fileNames = await fs.readdir(directoryPath);
-  expect(fileNames).toHaveLength(1);
-  return fs.readFile(path.join(directoryPath, fileNames[0]!), 'utf-8');
 }

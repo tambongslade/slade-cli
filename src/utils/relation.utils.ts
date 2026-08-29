@@ -67,7 +67,7 @@ export interface RelationEdge {
 export function parseRelationString(
   fieldName: string,
   relationStr: string,
-  sourceEntity: string
+  sourceEntity: string,
 ): Relation {
   const parts = relationStr.split(':');
   const targetEntity = parts[0];
@@ -112,7 +112,7 @@ export function generateInverseRelation(relation: Relation): Relation {
  */
 export function validateRelation(
   relation: Relation,
-  existingEntities: Set<string>
+  existingEntities: Set<string>,
 ): RelationValidationResult {
   const errors: string[] = [];
   const warnings: string[] = [];
@@ -129,8 +129,13 @@ export function validateRelation(
   }
 
   // Warn about missing inverse side for bidirectional relations
-  if ((relation.type === 'one-to-many' || relation.type === 'many-to-many') && !relation.inverseSide) {
-    warnings.push(`Consider adding inverseSide for ${relation.type} relation to enable bidirectional navigation`);
+  if (
+    (relation.type === 'one-to-many' || relation.type === 'many-to-many') &&
+    !relation.inverseSide
+  ) {
+    warnings.push(
+      `Consider adding inverseSide for ${relation.type} relation to enable bidirectional navigation`,
+    );
   }
 
   // Validate cascade options
@@ -173,15 +178,15 @@ export function buildRelationGraph(modulesPath: string): RelationGraph {
     return graph;
   }
 
-  const modules = fs.readdirSync(modulesPath).filter(f =>
-    fs.statSync(path.join(modulesPath, f)).isDirectory()
-  );
+  const modules = fs
+    .readdirSync(modulesPath)
+    .filter((f) => fs.statSync(path.join(modulesPath, f)).isDirectory());
 
   for (const moduleName of modules) {
     const entitiesPath = path.join(modulesPath, moduleName, 'domain', 'entities');
     if (!fs.existsSync(entitiesPath)) continue;
 
-    const entityFiles = fs.readdirSync(entitiesPath).filter(f => f.endsWith('.entity.ts'));
+    const entityFiles = fs.readdirSync(entitiesPath).filter((f) => f.endsWith('.entity.ts'));
 
     for (const file of entityFiles) {
       const content = fs.readFileSync(path.join(entitiesPath, file), 'utf-8');
@@ -256,52 +261,23 @@ export function detectCircularDependencies(graph: RelationGraph): string[][] {
 }
 
 /**
- * Generate TypeORM relation decorator
+ * Generate a Drizzle column/relation definition for a relation.
+ * many-to-one/one-to-one (owning side) become a real FK column; one-to-many
+ * and many-to-many have no column and are described as a `relations()` entry
+ * instead, since Drizzle has no column-level relation decorators.
  */
 export function generateRelationDecorator(relation: Relation): string {
-  const decoratorMap: Record<RelationType, string> = {
-    'one-to-one': 'OneToOne',
-    'one-to-many': 'OneToMany',
-    'many-to-one': 'ManyToOne',
-    'many-to-many': 'ManyToMany',
-  };
-
-  const decorator = decoratorMap[relation.type];
-  const options: string[] = [];
-
-  // Build options
-  if (relation.eager) options.push('eager: true');
-  if (relation.nullable !== undefined) options.push(`nullable: ${relation.nullable}`);
-  if (relation.onDelete) options.push(`onDelete: '${relation.onDelete}'`);
-  if (relation.onUpdate) options.push(`onUpdate: '${relation.onUpdate}'`);
-  if (relation.orphanedRowAction) options.push(`orphanedRowAction: '${relation.orphanedRowAction}'`);
-  if (relation.cascade?.length) {
-    options.push(`cascade: [${relation.cascade.map(c => `'${c}'`).join(', ')}]`);
-  }
-
-  const optionsStr = options.length > 0 ? `, { ${options.join(', ')} }` : '';
-  const inverseStr = relation.inverseSide
-    ? `, (${toCamelCase(relation.targetEntity)}) => ${toCamelCase(relation.targetEntity)}.${relation.inverseSide}`
-    : '';
-
-  let result = `@${decorator}(() => ${relation.targetEntity}${inverseStr}${optionsStr})`;
-
-  // Add JoinColumn for owning side
   if (relation.type === 'many-to-one' || (relation.type === 'one-to-one' && relation.joinColumn)) {
-    const joinColOptions = relation.joinColumn ? `{ name: '${relation.joinColumn}' }` : '';
-    result += `\n  @JoinColumn(${joinColOptions})`;
+    const columnName = relation.joinColumn || `${toSnakeCase(relation.name)}_id`;
+    const notNull = relation.nullable === false ? '.notNull()' : '';
+    const uniqueCall = relation.type === 'one-to-one' ? '.unique()' : '';
+    return `${relation.name}Id: uuid('${columnName}')${notNull}${uniqueCall}.references(() => ${toCamelCase(relation.targetEntity)}Table.id${relation.onDelete ? `, { onDelete: '${relation.onDelete.toLowerCase()}' }` : ''})`;
   }
 
-  // Add JoinTable for many-to-many owning side
-  if (relation.type === 'many-to-many' && relation.joinTable) {
-    result += `\n  @JoinTable({
-    name: '${relation.joinTable.name}',
-    joinColumn: { name: '${relation.joinTable.joinColumn}' },
-    inverseJoinColumn: { name: '${relation.joinTable.inverseJoinColumn}' },
-  })`;
-  }
-
-  return result;
+  // one-to-many / many-to-many (and the non-owning one-to-one side): no column
+  // on this table — define this in a Drizzle `relations()` call instead.
+  const helperName = relation.type === 'one-to-one' ? 'one' : 'many';
+  return `// ${relation.name}: define with Drizzle's relations() helper, e.g.\n// ${toCamelCase(relation.sourceEntity)}Relations = relations(${toCamelCase(relation.sourceEntity)}Table, ({ ${helperName} }) => ({ ${relation.name}: ${helperName}(${toCamelCase(relation.targetEntity)}Table) }))`;
 }
 
 /**
@@ -324,44 +300,29 @@ export function generateRelationFieldType(relation: Relation): string {
 export function generateRelationImports(relations: Relation[]): string[] {
   const imports = new Set<string>();
 
-  imports.add(`import { Entity, Column, PrimaryGeneratedColumn } from 'typeorm';`);
+  const needsUuid = relations.some(
+    (rel) => rel.type === 'many-to-one' || (rel.type === 'one-to-one' && rel.joinColumn),
+  );
+  const needsRelationsHelper = relations.some(
+    (rel) => rel.type === 'one-to-many' || rel.type === 'many-to-many' || rel.type === 'one-to-one',
+  );
 
-  const decorators = new Set<string>();
-  for (const rel of relations) {
-    switch (rel.type) {
-      case 'one-to-one':
-        decorators.add('OneToOne');
-        if (rel.joinColumn !== undefined) decorators.add('JoinColumn');
-        break;
-      case 'one-to-many':
-        decorators.add('OneToMany');
-        break;
-      case 'many-to-one':
-        decorators.add('ManyToOne');
-        decorators.add('JoinColumn');
-        break;
-      case 'many-to-many':
-        decorators.add('ManyToMany');
-        if (rel.joinTable) decorators.add('JoinTable');
-        break;
-    }
+  imports.add(`import { pgTable${needsUuid ? ', uuid' : ''} } from 'drizzle-orm/pg-core';`);
+  if (needsRelationsHelper) {
+    imports.add(`import { relations } from 'drizzle-orm';`);
   }
 
-  if (decorators.size > 0) {
-    const existing = [...decorators].filter(d =>
-      !['Entity', 'Column', 'PrimaryGeneratedColumn'].includes(d)
-    );
-    if (existing.length > 0) {
-      imports.add(`import { ${existing.join(', ')} } from 'typeorm';`);
-    }
-  }
-
-  // Add entity imports
+  // Add target table imports (Drizzle relations reference the table object, not a class)
   for (const rel of relations) {
+    const targetTable = `${rel.targetEntity}Table`;
     if (rel.targetModule && rel.targetModule !== rel.sourceModule) {
-      imports.add(`import { ${rel.targetEntity} } from '../../${rel.targetModule}/domain/entities/${toKebabCase(rel.targetEntity)}.entity';`);
+      imports.add(
+        `import { ${targetTable} } from '../../${rel.targetModule}/infrastructure/orm-entities/${toKebabCase(rel.targetEntity)}.orm-entity';`,
+      );
     } else {
-      imports.add(`import { ${rel.targetEntity} } from './${toKebabCase(rel.targetEntity)}.entity';`);
+      imports.add(
+        `import { ${targetTable} } from './${toKebabCase(rel.targetEntity)}.orm-entity';`,
+      );
     }
   }
 
@@ -389,10 +350,10 @@ function extractRelations(content: string, sourceEntity: string): Relation[] {
     const targetEntity = match[2];
 
     const typeMap: Record<string, RelationType> = {
-      'OneToOne': 'one-to-one',
-      'OneToMany': 'one-to-many',
-      'ManyToOne': 'many-to-one',
-      'ManyToMany': 'many-to-many',
+      OneToOne: 'one-to-one',
+      OneToMany: 'one-to-many',
+      ManyToOne: 'many-to-one',
+      ManyToMany: 'many-to-many',
     };
 
     // Find the field name that follows

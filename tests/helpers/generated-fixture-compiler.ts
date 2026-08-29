@@ -2,18 +2,14 @@ import * as fs from 'fs-extra';
 import * as path from 'path';
 import ts from 'typescript';
 
-export type FixtureOrm = 'typeorm' | 'prisma';
+export type FixtureOrm = 'drizzle' | 'prisma';
 
-function getGeneratedDependencyTypes(softDelete: boolean): string {
+function getGeneratedDependencyTypes(_softDelete: boolean): string {
   return `
 declare module "@nestjs/common" {
   export function Injectable(): ClassDecorator;
+  export function Inject(token: unknown): ParameterDecorator;
   export class NotFoundException extends Error {}
-}
-
-declare module "@nestjs/typeorm" {
-  export function InjectRepository(entity: unknown): ParameterDecorator;
-  export function getRepositoryToken(entity: unknown): string;
 }
 
 declare module "@nestjs/testing" {
@@ -54,27 +50,72 @@ declare module "class-validator" {
   export function IsIn(values: readonly unknown[]): PropertyDecorator;
 }
 
-declare module "typeorm" {
-  export type FindOptionsOrder<T> = {
-    [P in keyof T]?: "ASC" | "DESC";
-  };
-
-  export interface Repository<T> {
-    save(entity: Partial<T>): Promise<T>;
-    findOne(options: unknown): Promise<T | null>;
-    find(options?: unknown): Promise<T[]>;
-    findAndCount(options?: unknown): Promise<[T[], number]>;
-    update(id: string, entity: Partial<T>): Promise<{ affected?: number }>;
-    delete(id: string): Promise<{ affected?: number }>;
-    count(options?: unknown): Promise<number>;
+declare module "drizzle-orm/pg-core" {
+  export interface PgColumnBuilder<TData> {
+    notNull(): PgColumnBuilder<TData>;
+    unique(): PgColumnBuilder<TData>;
+    default(value: TData): PgColumnBuilder<TData>;
+    defaultRandom(): PgColumnBuilder<TData>;
+    defaultNow(): PgColumnBuilder<TData>;
+    primaryKey(): PgColumnBuilder<TData>;
+    references(
+      ref: () => PgColumnBuilder<any>,
+      options?: { onDelete?: string },
+    ): PgColumnBuilder<TData>;
   }
 
-  export function Entity(name: string): ClassDecorator;
-  export function PrimaryGeneratedColumn(strategy?: string): PropertyDecorator;
-  export function Column(options?: unknown): PropertyDecorator;
-  export function CreateDateColumn(options?: unknown): PropertyDecorator;
-  export function UpdateDateColumn(options?: unknown): PropertyDecorator;
-  export function DeleteDateColumn(options?: unknown): PropertyDecorator;
+  export function uuid(name: string): PgColumnBuilder<string>;
+  export function text(name: string): PgColumnBuilder<string>;
+  export function integer(name: string): PgColumnBuilder<number>;
+  export function doublePrecision(name: string): PgColumnBuilder<number>;
+  export function numeric(
+    name: string,
+    options: { mode: "number"; precision?: number; scale?: number },
+  ): PgColumnBuilder<number>;
+  export function numeric(
+    name: string,
+    options?: { mode?: "string"; precision?: number; scale?: number },
+  ): PgColumnBuilder<string>;
+  export function boolean(name: string): PgColumnBuilder<boolean>;
+  export function date(name: string): PgColumnBuilder<string>;
+  export function timestamp(
+    name: string,
+    options?: { withTimezone?: boolean },
+  ): PgColumnBuilder<Date>;
+  export function jsonb(name: string): PgColumnBuilder<unknown>;
+
+  type ColumnsShape = Record<string, PgColumnBuilder<any>>;
+  type DataOf<T> = T extends PgColumnBuilder<infer D> ? D : never;
+  type RowShape<T extends ColumnsShape> = { [K in keyof T]: DataOf<T[K]> };
+
+  export interface PgTable<TColumns extends ColumnsShape> {
+    $inferSelect: RowShape<TColumns>;
+    $inferInsert: Partial<RowShape<TColumns>>;
+  }
+
+  export function pgTable<TColumns extends ColumnsShape>(
+    name: string,
+    columns: TColumns,
+  ): PgTable<TColumns> & TColumns;
+}
+
+declare module "drizzle-orm" {
+  export function eq(column: unknown, value: unknown): unknown;
+  export function and(...conditions: unknown[]): unknown;
+  export function or(...conditions: unknown[]): unknown;
+  export function not(condition: unknown): unknown;
+  export function asc(column: unknown): unknown;
+  export function desc(column: unknown): unknown;
+  export function isNull(column: unknown): unknown;
+  export function inArray(column: unknown, values: unknown[]): unknown;
+  export function count(column?: unknown): unknown;
+  export function sql<T = unknown>(strings: TemplateStringsArray, ...values: unknown[]): T;
+  export type SQL<T = unknown> = unknown;
+}
+
+declare module "@shared/database/drizzle.provider" {
+  export const DRIZZLE: unique symbol;
+  export type DrizzleDb = any;
 }
 
 declare module "@prisma/client" {
@@ -85,7 +126,7 @@ declare module "@prisma/client" {
     is_active: boolean;
     created_at: Date;
     updated_at: Date;
-${softDelete ? '    deleted_at: Date | null;' : ''}
+${_softDelete ? '    deleted_at: Date | null;' : ''}
   }
 
   export namespace Prisma {
@@ -98,7 +139,7 @@ ${softDelete ? '    deleted_at: Date | null;' : ''}
       is_active?: boolean;
       created_at?: Date;
       updated_at?: Date;
-${softDelete ? '      deleted_at?: Date | null;' : ''}
+${_softDelete ? '      deleted_at?: Date | null;' : ''}
     }
 
     export interface InvoiceOrderByWithRelationInput {
@@ -108,7 +149,7 @@ ${softDelete ? '      deleted_at?: Date | null;' : ''}
       is_active?: SortOrder;
       created_at?: SortOrder;
       updated_at?: SortOrder;
-${softDelete ? '      deleted_at?: SortOrder;' : ''}
+${_softDelete ? '      deleted_at?: SortOrder;' : ''}
     }
   }
 }
@@ -150,7 +191,7 @@ export async function compileGeneratedRepositoryFixture(
     path.join(modulePath, 'infrastructure/repositories/invoice.repository.spec.ts'),
   ];
 
-  if (orm === 'typeorm') {
+  if (orm === 'drizzle') {
     rootNames.push(path.join(modulePath, 'infrastructure/orm-entities/invoice.orm-entity.ts'));
   }
 

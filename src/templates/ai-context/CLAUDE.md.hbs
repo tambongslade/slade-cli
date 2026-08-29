@@ -1,6 +1,6 @@
 # {{projectName}} - AI Assistant Context
 
-This is a NestJS project using Domain-Driven Design (DDD) patterns generated with `nestjs-ddd-cli`.
+This is a NestJS project using Domain-Driven Design (DDD) patterns generated with `slade-cli`.
 
 ## Project Structure
 
@@ -35,27 +35,27 @@ Generate new features using the DDD CLI:
 
 ```bash
 # Apply the standard reusable baseline for platform services
-ddd recipe service-foundation --install-deps
+slade recipe service-foundation --install-deps
 
 # Generate complete CRUD scaffolding with fields
-ddd scaffold User -m users --fields "name:string email:string:unique age:number:optional"
+slade scaffold User -m users --fields "name:string email:string:unique age:number:optional"
 
 # Exact financial values, authenticated scope, and no generic deletion
-ddd scaffold Invoice -m billing --fields "amount:money tenantId:uuid:serverOwned" --no-delete
+slade scaffold Invoice -m billing --fields "amount:money tenantId:uuid:serverOwned" --no-delete
 
 # Generate individual components
-ddd generate module [name]
-ddd generate entity [name] -m [module]
-ddd generate usecase [name] -m [module]
-ddd generate service [name] -m [module]
-ddd generate event [name] -m [module]
-ddd generate query [name] -m [module]
+slade generate module [name]
+slade generate entity [name] -m [module]
+slade generate usecase [name] -m [module]
+slade generate service [name] -m [module]
+slade generate event [name] -m [module]
+slade generate query [name] -m [module]
 ```
 
 ### Financial-safe scaffold fields
 
 - Use `money` for exact financial decimals. It persists as decimal/Prisma Decimal
-  while domain, TypeORM, request, and response properties are TypeScript `string`
+  while domain, Drizzle, request, and response properties are TypeScript `string`
   with decimal-string validation.
 - Add `serverOwned` (or its `internal` alias) to tenant, organization, book, store,
   or other fields supplied by trusted application context. These fields are not
@@ -84,7 +84,7 @@ ddd generate query [name] -m [module]
 3. **CQRS pattern**: Commands for writes, Queries for reads
 4. **Repository pattern**: Abstract data access behind interfaces
 5. **Mapper pattern**: Convert between domain and infrastructure entities
-6. **Recipe first**: Repeated platform behavior belongs in a `ddd recipe` or `.dddrc.json` option before copying custom implementation into another service
+6. **Recipe first**: Repeated platform behavior belongs in a `slade recipe` or `.dddrc.json` option before copying custom implementation into another service
 7. **Canonical contracts**: Shared data shapes, value objects, environment keys, and integration adapters must have one canonical source and one generated/reused implementation path
 
 ## Reusable Platform Baseline
@@ -92,7 +92,7 @@ ddd generate query [name] -m [module]
 For new platform services, start with:
 
 ```bash
-ddd recipe service-foundation --install-deps
+slade recipe service-foundation --install-deps
 ```
 
 This applies the reusable baseline for environment validation, health endpoints, API versioning, rate limiting, and filtering. If the same setup is needed in a second service, extend the CLI recipe instead of re-implementing it locally.
@@ -100,7 +100,7 @@ This applies the reusable baseline for environment validation, health endpoints,
 For durable cross-service events, use:
 
 ```bash
-ddd recipe event-backbone --install-deps
+slade recipe event-backbone --install-deps
 ```
 
 This applies the canonical Postgres event store/outbox source of truth with a Pulsar transport relay. Do not create new RabbitMQ/Kafka/Pulsar variants unless the platform decision changes.
@@ -108,7 +108,7 @@ This applies the canonical Postgres event store/outbox source of truth with a Pu
 For human-readable operational references, use:
 
 ```bash
-ddd recipe business-reference-identifiers
+slade recipe business-reference-identifiers
 ```
 
 Keep UUID/internal IDs canonical; meaningful references are sidecar metadata for support, reconciliation, receipts, partner files, logs, and dashboards.
@@ -196,7 +196,7 @@ Project configuration is in `.dddrc.json`:
 
 ```json
 {
-  "orm": "typeorm",
+  "orm": "drizzle",
   "database": "postgres",
   "features": {
     "swagger": true,

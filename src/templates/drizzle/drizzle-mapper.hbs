@@ -1,0 +1,81 @@
+import { Injectable } from "@nestjs/common";
+import { {{entityNamePascal}}Entity } from "@modules/{{moduleNameKebab}}/application/domain/entities/{{entityNameKebab}}.entity";
+import { {{entityNamePascal}}Row, New{{entityNamePascal}}Row } from "@modules/{{moduleNameKebab}}/infrastructure/orm-entities/{{entityNameKebab}}.orm-entity";
+import { {{entityNamePascal}}ResponseDto } from "@modules/{{moduleNameKebab}}/application/dto/responses/{{entityNameKebab}}.response.dto";
+
+@Injectable()
+export class {{entityNamePascal}}Mapper {
+  toDomainEntity(row: {{entityNamePascal}}Row): {{entityNamePascal}}Entity {
+    if (!row) {
+      throw new Error("Row is required");
+    }
+
+    return new {{entityNamePascal}}Entity({
+      id: row.id,
+      isActive: row.isActive,
+      createdAt: row.createdAt,
+      updatedAt: row.updatedAt,
+{{#if softDelete}}
+      deletedAt: row.deletedAt ?? undefined,
+{{/if}}
+{{#if hasFields}}
+{{#each fields}}
+      {{this.camelCase}}: row.{{#if this.isRelation}}{{this.camelCase}}Id{{else}}{{this.camelCase}}{{/if}},
+{{/each}}
+{{else}}
+      // Map your Drizzle row fields to domain entity
+      // propertyName: row.propertyName,
+{{/if}}
+    });
+  }
+
+  toDrizzleInsert(entity: {{entityNamePascal}}Entity): New{{entityNamePascal}}Row {
+    return {
+{{#if hasFields}}
+{{#each fields}}
+      {{this.camelCase}}{{#if this.isRelation}}Id{{/if}}: entity.{{this.camelCase}},
+{{/each}}
+{{else}}
+      // Map your domain entity to a Drizzle insert row
+      // propertyName: entity.propertyName,
+{{/if}}
+      isActive: entity.isActive ?? true,
+    } as New{{entityNamePascal}}Row;
+  }
+
+  toDrizzleUpdate(entity: {{entityNamePascal}}Entity): Partial<New{{entityNamePascal}}Row> {
+    return {
+{{#if hasFields}}
+{{#each fields}}
+      {{this.camelCase}}{{#if this.isRelation}}Id{{/if}}: entity.{{this.camelCase}},
+{{/each}}
+{{else}}
+      // Map your domain entity to a Drizzle update row
+      // propertyName: entity.propertyName,
+{{/if}}
+      isActive: entity.isActive,
+      updatedAt: new Date(),
+    };
+  }
+
+  toResponseDto(entity: {{entityNamePascal}}Entity): {{entityNamePascal}}ResponseDto {
+    return new {{entityNamePascal}}ResponseDto({
+      id: entity.id!,
+      isActive: entity.isActive!,
+      createdAt: entity.createdAt!,
+      updatedAt: entity.updatedAt!,
+{{#if hasFields}}
+{{#each fields}}
+      {{this.camelCase}}: entity.{{this.camelCase}},
+{{/each}}
+{{else}}
+      // Map your response fields
+      // propertyName: entity.propertyName,
+{{/if}}
+    });
+  }
+
+  toResponseDtoList(entities: {{entityNamePascal}}Entity[]): {{entityNamePascal}}ResponseDto[] {
+    return entities.map((entity) => this.toResponseDto(entity));
+  }
+}

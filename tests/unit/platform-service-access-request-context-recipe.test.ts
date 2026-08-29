@@ -71,10 +71,12 @@ describe('platform Service Access request-context recipe', () => {
       path.join(root, 'service-access-request-context.module.ts'),
       'utf-8',
     );
-    const docs = await fs.readFile(
-      path.join(testDir, 'docs/platform/platform-service-access-request-context.md'),
-      'utf-8',
-    );
+    const docs = (
+      await fs.readFile(
+        path.join(testDir, 'docs/platform/platform-service-access-request-context.md'),
+        'utf-8',
+      )
+    ).replace(/\r\n/g, '\n');
     const env = await fs.readFile(
       path.join(testDir, '.env.platform-service-access-request-context.example'),
       'utf-8',

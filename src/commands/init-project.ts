@@ -30,7 +30,7 @@ export async function initProject(projectName: string, options: InitProjectOptio
       if (needsUpdate) {
         console.log(
           chalk.yellow(
-            `You are using nestjs-ddd-cli version ${currentVersion}, but version ${latestVersion} is available.`,
+            `You are using slade-cli version ${currentVersion}, but version ${latestVersion} is available.`,
           ),
         );
 
@@ -44,7 +44,7 @@ export async function initProject(projectName: string, options: InitProjectOptio
         ]);
 
         if (shouldUpdate) {
-          await updatePackageGlobally('nestjs-ddd-cli');
+          await updatePackageGlobally('slade-cli');
           console.log(chalk.green('CLI updated successfully! Please run your command again.'));
           process.exit(0);
         }
@@ -102,11 +102,11 @@ export async function initProject(projectName: string, options: InitProjectOptio
     if (options.withDdd) {
       console.log(chalk.blue(`\nTo generate DDD components, use:`));
       console.log(
-        chalk.blue(`  ddd scaffold User -m users --fields "name:string email:string:unique"`),
+        chalk.blue(`  slade scaffold User -m users --fields "name:string email:string:unique"`),
       );
-      console.log(chalk.blue(`  ddd generate module <module-name>`));
-      console.log(chalk.blue(`  ddd generate entity <entity-name> -m <module-name>`));
-      console.log(chalk.blue(`  ddd generate usecase <usecase-name> -m <module-name>`));
+      console.log(chalk.blue(`  slade generate module <module-name>`));
+      console.log(chalk.blue(`  slade generate entity <entity-name> -m <module-name>`));
+      console.log(chalk.blue(`  slade generate usecase <usecase-name> -m <module-name>`));
     }
   } catch (error) {
     console.error(chalk.red('Error:'), (error as Error).message);

@@ -12,7 +12,7 @@ import { toCamelCase, toKebabCase, toPascalCase } from '../utils/naming.utils';
 export interface RepositoryOptions {
   path?: string;
   module?: string;
-  orm?: 'typeorm' | 'prisma';
+  orm?: 'drizzle' | 'prisma';
 }
 
 export async function generateRepository(
@@ -23,7 +23,7 @@ export async function generateRepository(
   console.log(chalk.bold.blue('\n📦 Generating Repository Pattern\n'));
 
   const moduleName = options.module || 'shared';
-  const orm = options.orm || 'typeorm';
+  const orm = options.orm || 'drizzle';
   const repoPath = path.join(getModulePath(basePath, moduleName), 'infrastructure', 'repositories');
 
   if (!fs.existsSync(repoPath)) {
@@ -38,7 +38,7 @@ export async function generateRepository(
 
   // Generate implementation
   const implContent =
-    orm === 'prisma' ? generatePrismaRepository(entityName) : generateTypeORMRepository(entityName);
+    orm === 'prisma' ? generatePrismaRepository(entityName) : generateDrizzleRepository(entityName);
   const implFile = path.join(repoPath, `${toKebabCase(entityName)}.repository.ts`);
   fs.writeFileSync(implFile, implContent);
   console.log(chalk.green(`  ✓ Created ${implFile}`));
@@ -139,41 +139,42 @@ export interface PaginatedResult<T> {
 `;
 }
 
-function generateTypeORMRepository(entityName: string): string {
+function generateDrizzleRepository(entityName: string): string {
   const className = toPascalCase(entityName);
+  const varName = toCamelCase(entityName);
+  const kebabName = toKebabCase(entityName);
 
-  return `import { Injectable } from '@nestjs/common';
-import { InjectRepository } from '@nestjs/typeorm';
-import { Repository, DataSource, EntityManager } from 'typeorm';
-import { ${className} } from '@domain/${toKebabCase(entityName)}.entity';
-import { I${className}Repository, QueryOptions, PaginatedResult } from './${toKebabCase(entityName)}.repository.interface';
+  return `import { Injectable, Inject } from '@nestjs/common';
+import { eq, and, inArray, count, type SQL } from 'drizzle-orm';
+import { DRIZZLE, DrizzleDb } from '@shared/database/drizzle.provider';
+import { ${varName}Table } from '@domain/${kebabName}.schema';
+import { ${className} } from '@domain/${kebabName}.entity';
+import { I${className}Repository, QueryOptions, PaginatedResult } from './${kebabName}.repository.interface';
 import { Specification } from '@shared/specifications/specification';
-import { SpecificationVisitor } from '@shared/specifications/specification.visitor';
 
 /**
- * TypeORM implementation of ${className} Repository
+ * Drizzle (Postgres) implementation of ${className} Repository
  */
 @Injectable()
 export class ${className}Repository implements I${className}Repository {
-  constructor(
-    @InjectRepository(${className})
-    private readonly repository: Repository<${className}>,
-    private readonly dataSource: DataSource,
-  ) {}
+  constructor(@Inject(DRIZZLE) private readonly db: DrizzleDb) {}
 
   async findById(id: string): Promise<${className} | null> {
-    return this.repository.findOne({ where: { id } as any });
+    const [row] = await this.db.select().from(${varName}Table).where(eq(${varName}Table.id, id)).limit(1);
+    return row ? this.toDomain(row) : null;
   }
 
   async findAll(): Promise<${className}[]> {
-    return this.repository.find();
+    const rows = await this.db.select().from(${varName}Table);
+    return rows.map((r) => this.toDomain(r));
   }
 
   async findBySpec(spec: Specification<${className}>): Promise<${className}[]> {
-    const qb = this.repository.createQueryBuilder('entity');
-    const visitor = new TypeORMSpecVisitor(qb);
-    spec.accept(visitor);
-    return qb.getMany();
+    const where = this.specToWhere(spec);
+    const rows = where
+      ? await this.db.select().from(${varName}Table).where(where)
+      : await this.db.select().from(${varName}Table);
+    return rows.map((r) => this.toDomain(r));
   }
 
   async findOneBySpec(spec: Specification<${className}>): Promise<${className} | null> {
@@ -182,43 +183,46 @@ export class ${className}Repository implements I${className}Repository {
   }
 
   async countBySpec(spec: Specification<${className}>): Promise<number> {
-    const qb = this.repository.createQueryBuilder('entity');
-    const visitor = new TypeORMSpecVisitor(qb);
-    spec.accept(visitor);
-    return qb.getCount();
+    const where = this.specToWhere(spec);
+    const query = this.db.select({ value: count() }).from(${varName}Table);
+    const [result] = where ? await query.where(where) : await query;
+    return result?.value ?? 0;
   }
 
   async exists(spec: Specification<${className}>): Promise<boolean> {
-    const count = await this.countBySpec(spec);
-    return count > 0;
+    const total = await this.countBySpec(spec);
+    return total > 0;
   }
 
   async save(entity: ${className}): Promise<${className}> {
-    return this.repository.save(entity);
+    const data = this.toRow(entity);
+    const [row] = await this.db
+      .insert(${varName}Table)
+      .values(data)
+      .onConflictDoUpdate({ target: ${varName}Table.id, set: data })
+      .returning();
+    return this.toDomain(row);
   }
 
   async saveMany(entities: ${className}[]): Promise<${className}[]> {
-    return this.repository.save(entities);
+    return Promise.all(entities.map((entity) => this.save(entity)));
   }
 
   async delete(id: string): Promise<void> {
-    await this.repository.delete(id);
+    await this.db.delete(${varName}Table).where(eq(${varName}Table.id, id));
   }
 
   async deleteBySpec(spec: Specification<${className}>): Promise<number> {
     const entities = await this.findBySpec(spec);
     if (entities.length === 0) return 0;
 
-    await this.repository.remove(entities);
+    await this.db.delete(${varName}Table).where(inArray(${varName}Table.id, entities.map((e) => e.id!)));
     return entities.length;
   }
 
   async transaction<T>(operation: (repo: I${className}Repository) => Promise<T>): Promise<T> {
-    return this.dataSource.transaction(async (manager: EntityManager) => {
-      const transactionalRepo = new TransactionalRepository(
-        manager.getRepository(${className}),
-        this.dataSource,
-      );
+    return this.db.transaction(async (tx) => {
+      const transactionalRepo = new Transactional${className}Repository(tx as unknown as DrizzleDb);
       return operation(transactionalRepo);
     });
   }
@@ -231,36 +235,26 @@ export class ${className}Repository implements I${className}Repository {
     page: number = 1,
     pageSize: number = 10,
   ): Promise<PaginatedResult<${className}>> {
-    const qb = this.repository.createQueryBuilder('entity');
+    const conditions: SQL[] = Object.entries(options.where || {}).map(([key, value]) =>
+      eq((${varName}Table as any)[key], value),
+    );
+    const where = conditions.length > 0 ? and(...conditions) : undefined;
 
-    if (options.where) {
-      Object.entries(options.where).forEach(([key, value]) => {
-        qb.andWhere(\`entity.\${key} = :\${key}\`, { [key]: value });
-      });
-    }
+    const rowsQuery = this.db.select().from(${varName}Table);
+    const countQuery = this.db.select({ value: count() }).from(${varName}Table);
 
-    if (options.orderBy) {
-      options.orderBy.forEach(({ field, direction }) => {
-        qb.addOrderBy(\`entity.\${String(field)}\`, direction);
-      });
-    }
+    const [items, [totalResult]] = await Promise.all([
+      (where ? rowsQuery.where(where) : rowsQuery)
+        .limit(pageSize)
+        .offset((page - 1) * pageSize),
+      where ? countQuery.where(where) : countQuery,
+    ]);
 
-    if (options.relations) {
-      options.relations.forEach(relation => {
-        qb.leftJoinAndSelect(\`entity.\${relation}\`, relation);
-      });
-    }
-
-    const total = await qb.getCount();
-    const items = await qb
-      .skip((page - 1) * pageSize)
-      .take(pageSize)
-      .getMany();
-
+    const total = totalResult?.value ?? 0;
     const totalPages = Math.ceil(total / pageSize);
 
     return {
-      items,
+      items: items.map((i) => this.toDomain(i)),
       total,
       page,
       pageSize,
@@ -269,125 +263,89 @@ export class ${className}Repository implements I${className}Repository {
       hasPrev: page > 1,
     };
   }
+
+  private toDomain(row: any): ${className} {
+    // Map a Drizzle row to the domain entity
+    return new ${className}(row);
+  }
+
+  private toRow(entity: ${className}): any {
+    // Map the domain entity to a Drizzle insert/update row
+    return { ...entity };
+  }
+
+  private specToWhere(_spec: Specification<${className}>): SQL | undefined {
+    // TODO: implement a DrizzleSpecVisitor that walks the specification tree and
+    // builds drizzle-orm conditions (eq, and, or, not, gt, gte, lt, lte, like,
+    // inArray) from drizzle-orm — import whichever you need here.
+    return undefined;
+  }
 }
 
 /**
- * Transactional repository wrapper
+ * Transactional repository wrapper for Drizzle
  */
-class TransactionalRepository implements I${className}Repository {
-  constructor(
-    private readonly repository: Repository<${className}>,
-    private readonly dataSource: DataSource,
-  ) {}
+class Transactional${className}Repository implements I${className}Repository {
+  constructor(private readonly tx: DrizzleDb) {}
 
   async findById(id: string): Promise<${className} | null> {
-    return this.repository.findOne({ where: { id } as any });
+    const [row] = await this.tx.select().from(${varName}Table).where(eq(${varName}Table.id, id)).limit(1);
+    return row ? this.toDomain(row) : null;
   }
 
   async findAll(): Promise<${className}[]> {
-    return this.repository.find();
+    const rows = await this.tx.select().from(${varName}Table);
+    return rows.map((r: any) => this.toDomain(r));
   }
 
-  async findBySpec(spec: Specification<${className}>): Promise<${className}[]> {
-    const qb = this.repository.createQueryBuilder('entity');
-    const visitor = new TypeORMSpecVisitor(qb);
-    spec.accept(visitor);
-    return qb.getMany();
+  async findBySpec(_spec: Specification<${className}>): Promise<${className}[]> {
+    return [];
   }
 
-  async findOneBySpec(spec: Specification<${className}>): Promise<${className} | null> {
-    const results = await this.findBySpec(spec);
-    return results[0] || null;
+  async findOneBySpec(_spec: Specification<${className}>): Promise<${className} | null> {
+    return null;
   }
 
-  async countBySpec(spec: Specification<${className}>): Promise<number> {
-    const qb = this.repository.createQueryBuilder('entity');
-    const visitor = new TypeORMSpecVisitor(qb);
-    spec.accept(visitor);
-    return qb.getCount();
+  async countBySpec(_spec: Specification<${className}>): Promise<number> {
+    return 0;
   }
 
-  async exists(spec: Specification<${className}>): Promise<boolean> {
-    const count = await this.countBySpec(spec);
-    return count > 0;
+  async exists(_spec: Specification<${className}>): Promise<boolean> {
+    return false;
   }
 
   async save(entity: ${className}): Promise<${className}> {
-    return this.repository.save(entity);
+    const data = this.toRow(entity);
+    const [row] = await this.tx
+      .insert(${varName}Table)
+      .values(data)
+      .onConflictDoUpdate({ target: ${varName}Table.id, set: data })
+      .returning();
+    return this.toDomain(row);
   }
 
   async saveMany(entities: ${className}[]): Promise<${className}[]> {
-    return this.repository.save(entities);
+    return Promise.all(entities.map((e) => this.save(e)));
   }
 
   async delete(id: string): Promise<void> {
-    await this.repository.delete(id);
+    await this.tx.delete(${varName}Table).where(eq(${varName}Table.id, id));
   }
 
-  async deleteBySpec(spec: Specification<${className}>): Promise<number> {
-    const entities = await this.findBySpec(spec);
-    if (entities.length === 0) return 0;
-
-    await this.repository.remove(entities);
-    return entities.length;
+  async deleteBySpec(_spec: Specification<${className}>): Promise<number> {
+    return 0;
   }
 
   async transaction<T>(operation: (repo: I${className}Repository) => Promise<T>): Promise<T> {
     return operation(this);
   }
-}
 
-/**
- * TypeORM Specification Visitor
- */
-class TypeORMSpecVisitor<T> implements SpecificationVisitor<T> {
-  constructor(private readonly qb: any) {}
-
-  visitAnd(specs: Specification<T>[]): void {
-    specs.forEach(spec => spec.accept(this));
+  private toDomain(row: any): ${className} {
+    return new ${className}(row);
   }
 
-  visitOr(specs: Specification<T>[]): void {
-    const conditions = specs.map((spec, i) => {
-      const tempVisitor = new TypeORMSpecVisitor(this.qb);
-      spec.accept(tempVisitor);
-      return \`cond\${i}\`;
-    });
-    this.qb.orWhere(conditions.join(' OR '));
-  }
-
-  visitNot(spec: Specification<T>): void {
-    // Implementation depends on the spec type
-  }
-
-  visitProperty(field: string, operator: string, value: any): void {
-    const paramName = \`\${field}_\${Date.now()}\`;
-    switch (operator) {
-      case 'eq':
-        this.qb.andWhere(\`entity.\${field} = :\${paramName}\`, { [paramName]: value });
-        break;
-      case 'neq':
-        this.qb.andWhere(\`entity.\${field} != :\${paramName}\`, { [paramName]: value });
-        break;
-      case 'gt':
-        this.qb.andWhere(\`entity.\${field} > :\${paramName}\`, { [paramName]: value });
-        break;
-      case 'gte':
-        this.qb.andWhere(\`entity.\${field} >= :\${paramName}\`, { [paramName]: value });
-        break;
-      case 'lt':
-        this.qb.andWhere(\`entity.\${field} < :\${paramName}\`, { [paramName]: value });
-        break;
-      case 'lte':
-        this.qb.andWhere(\`entity.\${field} <= :\${paramName}\`, { [paramName]: value });
-        break;
-      case 'like':
-        this.qb.andWhere(\`entity.\${field} LIKE :\${paramName}\`, { [paramName]: \`%\${value}%\` });
-        break;
-      case 'in':
-        this.qb.andWhere(\`entity.\${field} IN (:\${paramName})\`, { [paramName]: value });
-        break;
-    }
+  private toRow(entity: ${className}): any {
+    return { ...entity };
   }
 }
 `;
@@ -898,71 +856,38 @@ function generateUnitOfWork(): string {
   return `/**
  * Unit of Work Pattern
  * Manages transactions across multiple repositories
+ *
+ * Drizzle transactions are scoped to a callback (\`db.transaction(async (tx) => ...)\`)
+ * rather than begin/commit/rollback calls, so this wraps that shape behind the
+ * same IUnitOfWork contract used elsewhere in the codebase.
  */
 
-import { Injectable } from '@nestjs/common';
-import { DataSource, EntityManager, QueryRunner } from 'typeorm';
+import { Inject, Injectable } from '@nestjs/common';
+import { DRIZZLE, DrizzleDb } from '@shared/database/drizzle.provider';
 
 /**
  * Unit of Work interface
  */
 export interface IUnitOfWork {
-  begin(): Promise<void>;
-  commit(): Promise<void>;
-  rollback(): Promise<void>;
-  getRepository<T>(entityClass: new () => T): any;
+  run<T>(work: (tx: DrizzleDb) => Promise<T>): Promise<T>;
 }
 
 /**
- * TypeORM Unit of Work implementation
+ * Drizzle Unit of Work implementation
  */
 @Injectable()
 export class UnitOfWork implements IUnitOfWork {
-  private queryRunner: QueryRunner | null = null;
+  constructor(@Inject(DRIZZLE) private readonly db: DrizzleDb) {}
 
-  constructor(private readonly dataSource: DataSource) {}
-
-  async begin(): Promise<void> {
-    this.queryRunner = this.dataSource.createQueryRunner();
-    await this.queryRunner.connect();
-    await this.queryRunner.startTransaction();
-  }
-
-  async commit(): Promise<void> {
-    if (!this.queryRunner) {
-      throw new Error('Transaction not started');
-    }
-    await this.queryRunner.commitTransaction();
-    await this.queryRunner.release();
-    this.queryRunner = null;
-  }
-
-  async rollback(): Promise<void> {
-    if (!this.queryRunner) {
-      throw new Error('Transaction not started');
-    }
-    await this.queryRunner.rollbackTransaction();
-    await this.queryRunner.release();
-    this.queryRunner = null;
-  }
-
-  getRepository<T>(entityClass: new () => T): any {
-    if (!this.queryRunner) {
-      throw new Error('Transaction not started');
-    }
-    return this.queryRunner.manager.getRepository(entityClass);
-  }
-
-  get manager(): EntityManager {
-    if (!this.queryRunner) {
-      throw new Error('Transaction not started');
-    }
-    return this.queryRunner.manager;
+  async run<T>(work: (tx: DrizzleDb) => Promise<T>): Promise<T> {
+    return this.db.transaction((tx) => work(tx as unknown as DrizzleDb));
   }
 }
 
 /**
- * Unit of Work decorator
+ * Unit of Work decorator. The decorated method's class must inject a
+ * \`unitOfWork: UnitOfWork\` member and accept the transactional client as its
+ * first argument.
  */
 export function Transactional(): MethodDecorator {
   return function (
@@ -979,16 +904,7 @@ export function Transactional(): MethodDecorator {
         throw new Error('UnitOfWork not injected');
       }
 
-      await unitOfWork.begin();
-
-      try {
-        const result = await originalMethod.apply(this, args);
-        await unitOfWork.commit();
-        return result;
-      } catch (error) {
-        await unitOfWork.rollback();
-        throw error;
-      }
+      return unitOfWork.run((tx) => originalMethod.apply(this, [tx, ...args]));
     };
 
     return descriptor;

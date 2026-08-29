@@ -1,0 +1,146 @@
+import { Inject, Injectable } from "@nestjs/common";
+import { and, asc, desc, eq, isNull, sql } from "drizzle-orm";
+import { DRIZZLE, DrizzleDb } from "@shared/database/drizzle.provider";
+import { {{entityNameCamel}}Table, {{entityNamePascal}}Row } from "@modules/{{moduleNameKebab}}/infrastructure/orm-entities/{{entityNameKebab}}.orm-entity";
+import { {{entityNamePascal}}Entity } from "@modules/{{moduleNameKebab}}/application/domain/entities/{{entityNameKebab}}.entity";
+import { {{entityNamePascal}}Mapper } from "@modules/{{moduleNameKebab}}/infrastructure/mappers/{{entityNameKebab}}.mapper";
+
+const {{entityNameCamel}}OrderFields = [
+  "id",
+{{#each fields}}
+  "{{this.camelCase}}{{#if this.isRelation}}Id{{/if}}",
+{{/each}}
+  "isActive",
+  "createdAt",
+  "updatedAt",
+] as const satisfies readonly (keyof {{entityNamePascal}}Row)[];
+
+export type {{entityNamePascal}}OrderField = (typeof {{entityNameCamel}}OrderFields)[number];
+
+export interface {{entityNamePascal}}PaginationOptions {
+  skip: number;
+  take: number;
+  orderBy: {{entityNamePascal}}OrderField;
+  orderDirection: "ASC" | "DESC";
+}
+
+@Injectable()
+export class {{entityNamePascal}}Repository {
+  constructor(
+    @Inject(DRIZZLE) private readonly db: DrizzleDb,
+    private readonly mapper: {{entityNamePascal}}Mapper,
+  ) {}
+
+  static isOrderByField(value: string): value is {{entityNamePascal}}OrderField {
+    return {{entityNameCamel}}OrderFields.some((field) => field === value);
+  }
+
+  async create(entity: {{entityNamePascal}}Entity): Promise<{{entityNamePascal}}Entity> {
+    const data = this.mapper.toDrizzleInsert(entity);
+    const [row] = await this.db.insert({{entityNameCamel}}Table).values(data).returning();
+    return this.mapper.toDomainEntity(row);
+  }
+
+  async findById(id: string): Promise<{{entityNamePascal}}Entity | null> {
+    const [row] = await this.db
+      .select()
+      .from({{entityNameCamel}}Table)
+      .where(
+{{#if softDelete}}
+        and(eq({{entityNameCamel}}Table.id, id), isNull({{entityNameCamel}}Table.deletedAt)),
+{{else}}
+        eq({{entityNameCamel}}Table.id, id),
+{{/if}}
+      )
+      .limit(1);
+
+    return row ? this.mapper.toDomainEntity(row) : null;
+  }
+
+  async findAll(): Promise<{{entityNamePascal}}Entity[]> {
+    const query = this.db.select().from({{entityNameCamel}}Table);
+{{#if softDelete}}
+    const rows = await query.where(isNull({{entityNameCamel}}Table.deletedAt));
+{{else}}
+    const rows = await query;
+{{/if}}
+
+    return rows.map((row: {{entityNamePascal}}Row) => this.mapper.toDomainEntity(row));
+  }
+
+  async findAllPaginated(
+    options: {{entityNamePascal}}PaginationOptions,
+  ): Promise<[{{entityNamePascal}}Entity[], number]> {
+    const { skip, take, orderBy, orderDirection } = options;
+    const orderColumn = {{entityNameCamel}}Table[orderBy];
+    const orderFn = orderDirection === "ASC" ? asc : desc;
+
+    const rowsQuery = this.db.select().from({{entityNameCamel}}Table);
+    const countQuery = this.db
+      .select({ count: sql<number>`count(*)::int` })
+      .from({{entityNameCamel}}Table);
+
+    const [rows, [countResult]] = await Promise.all([
+{{#if softDelete}}
+      rowsQuery
+        .where(isNull({{entityNameCamel}}Table.deletedAt))
+        .orderBy(orderFn(orderColumn))
+        .limit(take)
+        .offset(skip),
+      countQuery.where(isNull({{entityNameCamel}}Table.deletedAt)),
+{{else}}
+      rowsQuery.orderBy(orderFn(orderColumn)).limit(take).offset(skip),
+      countQuery,
+{{/if}}
+    ]);
+
+    const entities = rows.map((row: {{entityNamePascal}}Row) => this.mapper.toDomainEntity(row));
+    return [entities, countResult?.count ?? 0];
+  }
+
+  async update(id: string, entity: {{entityNamePascal}}Entity): Promise<{{entityNamePascal}}Entity> {
+    const data = this.mapper.toDrizzleUpdate(entity);
+    const [row] = await this.db
+      .update({{entityNameCamel}}Table)
+      .set(data)
+      .where(eq({{entityNameCamel}}Table.id, id))
+      .returning();
+    return this.mapper.toDomainEntity(row);
+  }
+
+{{#if deleteEnabled}}
+  async delete(id: string): Promise<void> {
+{{#if softDelete}}
+    await this.db
+      .update({{entityNameCamel}}Table)
+      .set({ deletedAt: new Date(), isActive: false })
+      .where(eq({{entityNameCamel}}Table.id, id));
+{{else}}
+    await this.db.delete({{entityNameCamel}}Table).where(eq({{entityNameCamel}}Table.id, id));
+{{/if}}
+  }
+
+{{#if hardDelete}}
+  async hardDelete(id: string): Promise<void> {
+    await this.db.delete({{entityNameCamel}}Table).where(eq({{entityNameCamel}}Table.id, id));
+  }
+
+{{/if}}
+
+{{/if}}
+  async exists(id: string): Promise<boolean> {
+    const [row] = await this.db
+      .select({ id: {{entityNameCamel}}Table.id })
+      .from({{entityNameCamel}}Table)
+      .where(
+{{#if softDelete}}
+        and(eq({{entityNameCamel}}Table.id, id), isNull({{entityNameCamel}}Table.deletedAt)),
+{{else}}
+        eq({{entityNameCamel}}Table.id, id),
+{{/if}}
+      )
+      .limit(1);
+
+    return !!row;
+  }
+}

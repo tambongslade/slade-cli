@@ -255,7 +255,7 @@ export async function checkForCliUpdate(): Promise<{
 }> {
   const currentVersion = getCurrentPackageVersion();
   try {
-    const latestVersion = await getLatestVersion('nestjs-ddd-cli');
+    const latestVersion = await getLatestVersion('slade-cli');
     const needsUpdate = isNewerVersion(latestVersion, currentVersion);
     return { needsUpdate, latestVersion, currentVersion };
   } catch (error) {

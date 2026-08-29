@@ -20,31 +20,31 @@ export async function generateShared(options: GenerateSharedOptions) {
   await ensureDir(path.join(sharedPath, 'pipes'));
   await ensureDir(path.join(sharedPath, 'utils'));
 
-  // Base ORM Entity
-  const baseOrmEntityContent = `import {
-  PrimaryGeneratedColumn,
-  CreateDateColumn,
-  UpdateDateColumn,
-  DeleteDateColumn,
-  Column,
-} from "typeorm";
+  // Base Drizzle columns
+  const baseOrmEntityContent = `import { pgTable, uuid, boolean, timestamp } from "drizzle-orm/pg-core";
 
-export abstract class BaseOrmEntity {
-  @PrimaryGeneratedColumn("uuid")
-  id: string;
-
-  @Column({ name: "is_active", default: true })
-  isActive: boolean;
-
-  @CreateDateColumn({ name: "created_at" })
-  createdAt: Date;
-
-  @UpdateDateColumn({ name: "updated_at" })
-  updatedAt: Date;
-
-  @DeleteDateColumn({ name: "deleted_at" })
-  deletedAt?: Date;
+/**
+ * Common columns shared by every aggregate table. Spread these into a
+ * \`pgTable(...)\` column definition, e.g.:
+ *
+ *   export const usersTable = pgTable("users", {
+ *     ...baseColumns(),
+ *     email: text("email").notNull().unique(),
+ *   });
+ */
+export function baseColumns() {
+  return {
+    id: uuid("id").defaultRandom().primaryKey(),
+    isActive: boolean("is_active").notNull().default(true),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+    updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
+    deletedAt: timestamp("deleted_at", { withTimezone: true }),
+  };
 }
+
+// Re-exported so shared/base can be imported even where only the table
+// builder is needed (keeps drizzle-orm/pg-core out of consumers' imports).
+export { pgTable };
 `;
   await writeFile(path.join(sharedPath, 'base/base-orm.entity.ts'), baseOrmEntityContent);
 
@@ -148,7 +148,10 @@ export class AllExceptionsFilter implements ExceptionFilter {
   }
 }
 `;
-  await writeFile(path.join(sharedPath, 'filters/all-exceptions.filter.ts'), httpExceptionFilterContent);
+  await writeFile(
+    path.join(sharedPath, 'filters/all-exceptions.filter.ts'),
+    httpExceptionFilterContent,
+  );
 
   // Transform Interceptor
   const transformInterceptorContent = `import {
@@ -192,7 +195,10 @@ export class TransformInterceptor<T>
   }
 }
 `;
-  await writeFile(path.join(sharedPath, 'interceptors/transform.interceptor.ts'), transformInterceptorContent);
+  await writeFile(
+    path.join(sharedPath, 'interceptors/transform.interceptor.ts'),
+    transformInterceptorContent,
+  );
 
   // Logging Interceptor
   const loggingInterceptorContent = `import {
@@ -228,7 +234,10 @@ export class LoggingInterceptor implements NestInterceptor {
   }
 }
 `;
-  await writeFile(path.join(sharedPath, 'interceptors/logging.interceptor.ts'), loggingInterceptorContent);
+  await writeFile(
+    path.join(sharedPath, 'interceptors/logging.interceptor.ts'),
+    loggingInterceptorContent,
+  );
 
   // Validation Pipe
   const validationPipeContent = `import {
@@ -326,30 +335,48 @@ export function generateRandomString(length: number): string {
   await writeFile(path.join(sharedPath, 'utils/string.utils.ts'), stringUtilsContent);
 
   // Index files
-  await writeFile(path.join(sharedPath, 'base/index.ts'), `export * from "./base-orm.entity";
+  await writeFile(
+    path.join(sharedPath, 'base/index.ts'),
+    `export * from "./base-orm.entity";
 export * from "./base-domain.entity";
-`);
+`,
+  );
 
-  await writeFile(path.join(sharedPath, 'filters/index.ts'), `export * from "./all-exceptions.filter";
-`);
+  await writeFile(
+    path.join(sharedPath, 'filters/index.ts'),
+    `export * from "./all-exceptions.filter";
+`,
+  );
 
-  await writeFile(path.join(sharedPath, 'interceptors/index.ts'), `export * from "./transform.interceptor";
+  await writeFile(
+    path.join(sharedPath, 'interceptors/index.ts'),
+    `export * from "./transform.interceptor";
 export * from "./logging.interceptor";
-`);
+`,
+  );
 
-  await writeFile(path.join(sharedPath, 'pipes/index.ts'), `export * from "./validation.pipe";
-`);
+  await writeFile(
+    path.join(sharedPath, 'pipes/index.ts'),
+    `export * from "./validation.pipe";
+`,
+  );
 
-  await writeFile(path.join(sharedPath, 'utils/index.ts'), `export * from "./date.utils";
+  await writeFile(
+    path.join(sharedPath, 'utils/index.ts'),
+    `export * from "./date.utils";
 export * from "./string.utils";
-`);
+`,
+  );
 
-  await writeFile(path.join(sharedPath, 'index.ts'), `export * from "./base";
+  await writeFile(
+    path.join(sharedPath, 'index.ts'),
+    `export * from "./base";
 export * from "./filters";
 export * from "./interceptors";
 export * from "./pipes";
 export * from "./utils";
-`);
+`,
+  );
 
   console.log(chalk.green('  ✓ Base entities (ORM and Domain)'));
   console.log(chalk.green('  ✓ Exception filters'));
@@ -359,7 +386,8 @@ export * from "./utils";
 
   console.log(chalk.green('\n✅ Shared module generated successfully!'));
   console.log(chalk.cyan('\nUsage in app.module.ts:'));
-  console.log(chalk.gray(`
+  console.log(
+    chalk.gray(`
   import { AllExceptionsFilter } from "@shared/filters";
   import { TransformInterceptor } from "@shared/interceptors";
   import { CustomValidationPipe } from "@shared/pipes";
@@ -367,5 +395,6 @@ export * from "./utils";
   app.useGlobalFilters(new AllExceptionsFilter());
   app.useGlobalInterceptors(new TransformInterceptor());
   app.useGlobalPipes(new CustomValidationPipe());
-`));
+`),
+  );
 }

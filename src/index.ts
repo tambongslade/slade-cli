@@ -77,8 +77,8 @@ import { getDryRunFiles, resetDryRunFiles } from './utils/file.utils';
 const program = new Command();
 
 program
-  .name('ddd')
-  .description('CLI for generating NestJS DDD boilerplate code')
+  .name('slade')
+  .description('CLI for generating NestJS DDD boilerplate code (Drizzle + PostgreSQL)')
   .version(getCurrentPackageVersion());
 
 // Check for updates on every run
@@ -88,10 +88,10 @@ program
     if (needsUpdate) {
       console.log(
         chalk.yellow(
-          `You are using nestjs-ddd-cli version ${currentVersion}, but version ${latestVersion} is available.`,
+          `You are using slade-cli version ${currentVersion}, but version ${latestVersion} is available.`,
         ),
       );
-      console.log(chalk.yellow(`Run 'ddd update' to update to the latest version.`));
+      console.log(chalk.yellow(`Run 'slade update' to update to the latest version.`));
     }
   } catch {
     // Silently ignore update check errors
@@ -199,7 +199,7 @@ program
     '--no-delete',
     'Omit the generic DELETE route, command/use case, and repository deletion method',
   )
-  .option('-o, --orm <orm>', 'ORM to use (typeorm or prisma)', 'typeorm')
+  .option('-o, --orm <orm>', 'ORM to use (drizzle or prisma)', 'drizzle')
   .option('--with-tests', 'Generate test files alongside the code', false)
   .option('--with-graphql', 'Generate GraphQL resolvers and types', false)
   .option('--dry-run', 'Preview files that would be generated without writing', false)
@@ -429,7 +429,7 @@ program
   .description('Generate database migrations (actions: create, generate)')
   .option('-p, --path <path>', 'Path to the project', process.cwd())
   .option('-m, --module <module>', 'Module name (for generate action)')
-  .option('-o, --orm <orm>', 'ORM to use (typeorm, prisma)', 'typeorm')
+  .option('-o, --orm <orm>', 'ORM to use (drizzle, prisma)', 'drizzle')
   .option('--migration-path <path>', 'Custom migration output directory')
   .option('--dry-run', 'Preview files without writing', false)
   .action(async (action, name, options) => {
@@ -796,7 +796,7 @@ program
   .command('migration-diff')
   .description('Generate migration from schema differences')
   .option('-p, --path <path>', 'Path to the project', process.cwd())
-  .option('-o, --orm <orm>', 'ORM to use (typeorm, prisma)', 'typeorm')
+  .option('-o, --orm <orm>', 'ORM to use (drizzle, prisma)', 'drizzle')
   .option('--dry-run', 'Preview without generating files', false)
   .action(async (options) => {
     try {
@@ -853,7 +853,7 @@ program
   .command('test-infra')
   .description('Generate comprehensive test infrastructure with factories and fixtures')
   .option('-p, --path <path>', 'Path to the project', process.cwd())
-  .option('-o, --orm <orm>', 'ORM type (typeorm, prisma)', 'typeorm')
+  .option('-o, --orm <orm>', 'ORM type (drizzle, prisma)', 'drizzle')
   .action(async (options) => {
     try {
       await setupTestInfrastructure(options.path || process.cwd(), {
@@ -904,7 +904,7 @@ program
   .description('Generate repository with specification pattern')
   .option('-p, --path <path>', 'Path to the project', process.cwd())
   .option('-m, --module <module>', 'Module name')
-  .option('-o, --orm <orm>', 'ORM type (typeorm, prisma)', 'typeorm')
+  .option('-o, --orm <orm>', 'ORM type (drizzle, prisma)', 'drizzle')
   .action(async (entityName, options) => {
     try {
       await generateRepository(entityName, options.path || process.cwd(), {
@@ -1201,7 +1201,7 @@ program
   .description('Set up database optimization (DataLoader, query analyzer, connection pool)')
   .option('-p, --path <path>', 'Path to the project', process.cwd())
   .option('-m, --module <module>', 'Module name', 'shared')
-  .option('-o, --orm <orm>', 'ORM type (typeorm, prisma, mikro-orm)', 'typeorm')
+  .option('-o, --orm <orm>', 'ORM type (drizzle, prisma)', 'drizzle')
   .option('--dataloader', 'Include DataLoader for N+1 prevention', true)
   .option('--analyzer', 'Include query analyzer', true)
   .action(async (options) => {
@@ -1224,7 +1224,7 @@ program
   .description('Set up database seeding infrastructure with fixtures')
   .option('-p, --path <path>', 'Path to the project', process.cwd())
   .option('-m, --module <module>', 'Module name', 'shared')
-  .option('-o, --orm <orm>', 'ORM type (typeorm, prisma, mikro-orm)', 'typeorm')
+  .option('-o, --orm <orm>', 'ORM type (drizzle, prisma)', 'drizzle')
   .option('-e, --entities <entities>', 'Entity names (comma-separated)')
   .action(async (options) => {
     try {

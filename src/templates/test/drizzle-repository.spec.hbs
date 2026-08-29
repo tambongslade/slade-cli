@@ -1,0 +1,192 @@
+import { Test, TestingModule } from "@nestjs/testing";
+import { DRIZZLE } from "@shared/database/drizzle.provider";
+import { {{entityNamePascal}}Repository } from "./{{entityNameKebab}}.repository";
+import { {{entityNamePascal}}Mapper } from "../mappers/{{entityNameKebab}}.mapper";
+import { {{entityNamePascal}}Entity } from "@modules/{{moduleNameKebab}}/application/domain/entities/{{entityNameKebab}}.entity";
+
+function createQueryBuilder<T>(result: T) {
+  const builder: any = {
+    from: jest.fn(() => builder),
+    where: jest.fn(() => builder),
+    limit: jest.fn(() => builder),
+    offset: jest.fn(() => builder),
+    orderBy: jest.fn(() => builder),
+    values: jest.fn(() => builder),
+    set: jest.fn(() => builder),
+    returning: jest.fn(() => builder),
+    then: (resolve: (value: T) => void) => resolve(result),
+  };
+  return builder;
+}
+
+describe("{{entityNamePascal}}Repository", () => {
+  let repository: {{entityNamePascal}}Repository;
+  let db: { select: jest.Mock; insert: jest.Mock; update: jest.Mock; delete: jest.Mock };
+  let mapper: jest.Mocked<{{entityNamePascal}}Mapper>;
+
+  const mockRow = {
+    id: "test-uuid",
+{{#each fields}}
+    {{this.camelCase}}{{#if this.isRelation}}Id{{/if}}: undefined as never,
+{{/each}}
+    isActive: true,
+    createdAt: new Date(),
+    updatedAt: new Date(),
+{{#if softDelete}}
+    deletedAt: null,
+{{/if}}
+  };
+
+  const mockDomainEntity = new {{entityNamePascal}}Entity({
+    id: "test-uuid",
+{{#each fields}}
+    {{this.camelCase}}: undefined as never,
+{{/each}}
+    isActive: true,
+    createdAt: new Date(),
+    updatedAt: new Date(),
+  });
+
+  beforeEach(async () => {
+    db = {
+      select: jest.fn(),
+      insert: jest.fn(),
+      update: jest.fn(),
+      delete: jest.fn(),
+    };
+
+    const module: TestingModule = await Test.createTestingModule({
+      providers: [
+        {{entityNamePascal}}Repository,
+        { provide: DRIZZLE, useValue: db },
+        {
+          provide: {{entityNamePascal}}Mapper,
+          useValue: {
+            toDrizzleInsert: jest.fn(),
+            toDrizzleUpdate: jest.fn(),
+            toDomainEntity: jest.fn(),
+            toResponseDto: jest.fn(),
+          },
+        },
+      ],
+    }).compile();
+
+    repository = module.get<{{entityNamePascal}}Repository>({{entityNamePascal}}Repository);
+    mapper = module.get({{entityNamePascal}}Mapper);
+  });
+
+  describe("create", () => {
+    it("should insert and return a domain entity", async () => {
+      mapper.toDrizzleInsert.mockReturnValue({} as any);
+      db.insert.mockReturnValue(createQueryBuilder([mockRow]));
+      mapper.toDomainEntity.mockReturnValue(mockDomainEntity);
+
+      const result = await repository.create(mockDomainEntity);
+
+      expect(db.insert).toHaveBeenCalled();
+      expect(mapper.toDomainEntity).toHaveBeenCalledWith(mockRow);
+      expect(result).toEqual(mockDomainEntity);
+    });
+  });
+
+  describe("findById", () => {
+    it("should return a domain entity when found", async () => {
+      db.select.mockReturnValue(createQueryBuilder([mockRow]));
+      mapper.toDomainEntity.mockReturnValue(mockDomainEntity);
+
+      const result = await repository.findById("test-uuid");
+
+      expect(db.select).toHaveBeenCalled();
+      expect(result).toEqual(mockDomainEntity);
+    });
+
+    it("should return null when the entity is not found", async () => {
+      db.select.mockReturnValue(createQueryBuilder([]));
+
+      const result = await repository.findById("missing-uuid");
+
+      expect(result).toBeNull();
+    });
+  });
+
+  describe("findAllPaginated", () => {
+    it("should return paginated entities with a total count", async () => {
+      db.select
+        .mockReturnValueOnce(createQueryBuilder([mockRow]))
+        .mockReturnValueOnce(createQueryBuilder([{ count: 1 }]));
+      mapper.toDomainEntity.mockReturnValue(mockDomainEntity);
+
+      const [entities, total] = await repository.findAllPaginated({
+        skip: 0,
+        take: 10,
+        orderBy: "createdAt",
+        orderDirection: "DESC",
+      });
+
+      expect(entities).toHaveLength(1);
+      expect(total).toBe(1);
+    });
+  });
+
+  describe("update", () => {
+    it("should update and return the entity", async () => {
+      mapper.toDrizzleUpdate.mockReturnValue({} as any);
+      db.update.mockReturnValue(createQueryBuilder([mockRow]));
+      mapper.toDomainEntity.mockReturnValue(mockDomainEntity);
+
+      const result = await repository.update("test-uuid", mockDomainEntity);
+
+      expect(db.update).toHaveBeenCalled();
+      expect(result).toEqual(mockDomainEntity);
+    });
+  });
+
+{{#if deleteEnabled}}
+  describe("delete", () => {
+{{#if softDelete}}
+    it("should soft delete the entity", async () => {
+      db.update.mockReturnValue(createQueryBuilder(undefined));
+
+      await repository.delete("test-uuid");
+
+      expect(db.update).toHaveBeenCalled();
+    });
+{{else}}
+    it("should delete the entity", async () => {
+      db.delete.mockReturnValue(createQueryBuilder(undefined));
+
+      await repository.delete("test-uuid");
+
+      expect(db.delete).toHaveBeenCalled();
+    });
+{{/if}}
+  });
+
+{{#if hardDelete}}
+  describe("hardDelete", () => {
+    it("should permanently delete the entity after explicit opt-in", async () => {
+      db.delete.mockReturnValue(createQueryBuilder(undefined));
+
+      await repository.hardDelete("test-uuid");
+
+      expect(db.delete).toHaveBeenCalled();
+    });
+  });
+
+{{/if}}
+
+{{/if}}
+  describe("exists", () => {
+    it("should return true when the entity exists", async () => {
+      db.select.mockReturnValue(createQueryBuilder([{ id: "test-uuid" }]));
+
+      await expect(repository.exists("test-uuid")).resolves.toBe(true);
+    });
+
+    it("should return false when the entity does not exist", async () => {
+      db.select.mockReturnValue(createQueryBuilder([]));
+
+      await expect(repository.exists("missing-uuid")).resolves.toBe(false);
+    });
+  });
+});

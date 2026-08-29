@@ -1,4 +1,5 @@
 import { describe, expect, it } from '@jest/globals';
+import * as path from 'path';
 import {
   compareVersions,
   getNestProjectExecution,
@@ -24,14 +25,15 @@ describe('Dependency Utils', () => {
   });
 
   it('runs Nest from the requested parent with a relative target directory', () => {
+    const targetDirectory = path.join('tmp', 'ddd-projects', 'joona-pay-cli-smoke');
     const execution = getNestProjectExecution('JoonaPayCliSmoke', {
-      directory: '/tmp/ddd-projects/joona-pay-cli-smoke',
+      directory: targetDirectory,
       skipInstall: true,
     });
 
-    expect(execution.cwd).toBe('/tmp/ddd-projects');
+    expect(execution.cwd).toBe(path.dirname(path.resolve(targetDirectory)));
     expect(execution.args).toContain('joona-pay-cli-smoke');
-    expect(execution.args).not.toContain('/tmp/ddd-projects/joona-pay-cli-smoke');
+    expect(execution.args).not.toContain(path.resolve(targetDirectory));
     expect(execution.args).toContain('--skip-install');
   });
 });
